@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE
+/.idea
+/.vscode
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Misc
+.DS_Store
