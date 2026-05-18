@@ -1,0 +1,39 @@
+# Dockerfile.base.arm64 - 基础镜像构建（ARM64 架构）
+# 用途：使用 uv 安装所有 Python 依赖，供内网应用镜像直接使用
+FROM ghcr.nju.edu.cn/astral-sh/uv:python3.12-bookworm-slim
+
+# 设置工作目录
+WORKDIR /build
+
+# 替换 Debian 软件源为阿里云镜像源
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources || \
+    sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list
+
+# 安装 tzdata 并设置中国时区
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
+    && apt-get purge -y --auto-remove tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 git + 下载工具，一次 apt 减少层数
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 Node.js 20.x（用于运行 claude CLI）
+# 使用阿里云镜像下载 Node.js ARM64 二进制
+ENV NODE_VERSION=20.19.0
+RUN curl -fsSL --connect-timeout 60 --max-time 600 "https://mirrors.aliyun.com/nodejs-release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz" -o node.tar.xz \
+    && tar -xJf node.tar.xz -C /usr/local --strip-components=1 \
+    && rm node.tar.xz
+
+# 配置 npm 使用淘宝镜像
+RUN npm config set registry https://registry.npmmirror.com
+
+# 安装 Claude Code CLI（替代 bundled CLI，避免 Bun AVX2 兼容性问题）
+# 锁定版本 2.1.100
+RUN npm install -g @anthropic-ai/claude-code@2.1.100
