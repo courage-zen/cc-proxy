@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Build multica-daemon application image (cc-proxy + Claude CLI on top of base image)
+# Build cc-proxy application image (国内镜像源版)
 #
 # Prerequisites:
-#   1. Build the base image first: ./build-base.sh (x86_64) or ./build-base-arm64.sh
-#   2. Place pre-built cc-proxy binary in release/cc-proxy-amd64 or release/cc-proxy-arm64
+#   Place pre-built cc-proxy binary in release/cc-proxy-amd64 or release/cc-proxy-arm64
 #
 # Usage:
 #   ./build.sh              # build x86_64 (default)
@@ -17,13 +16,11 @@ cd "${SCRIPT_DIR}"
 
 ARCH="${1:-amd64}"
 
-# Map architecture to base image name and binary filename
+# Map architecture to binary filename and image name
 if [[ "${ARCH}" == "arm64" ]]; then
-    BASE_IMAGE="multica-daemon-base-arm64:latest"
     BINARY="release/cc-proxy-arm64"
     FINAL_IMAGE="multica-daemon-arm64"
 elif [[ "${ARCH}" == "amd64" ]]; then
-    BASE_IMAGE="multica-daemon-base:latest"
     BINARY="release/cc-proxy-amd64"
     FINAL_IMAGE="multica-daemon"
 else
@@ -42,18 +39,10 @@ if [[ ! -f "${BINARY}" ]]; then
 fi
 
 echo "==> Building ${FINAL_IMAGE}:${IMAGE_TAG} (${ARCH})..."
-echo "    Base image: ${BASE_IMAGE}"
 echo "    Binary: ${BINARY}"
 
-if [[ "${ARCH}" == "arm64" ]]; then
-    BASE_ARG="BASE_IMAGE_ARM64=${BASE_IMAGE}"
-else
-    BASE_ARG="BASE_IMAGE_AMD64=${BASE_IMAGE}"
-fi
-
 docker build \
-  -f Dockerfile \
-  --build-arg "${BASE_ARG}" \
+  -f Dockerfile.cn \
   --build-arg "TARGETARCH=${ARCH}" \
   -t "${FINAL_IMAGE}:${IMAGE_TAG}" \
   .
