@@ -33,7 +33,8 @@ use super::{
     ProxyError,
 };
 use crate::app_config::AppType;
-use crate::database::PRICING_SOURCE_REQUEST;
+/// Pricing model source constant — "request" means use request model for pricing
+const PRICING_SOURCE_REQUEST: &str = "request";
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -211,7 +212,7 @@ fn validate_claude_desktop_gateway_auth(
     state: &ProxyState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), ProxyError> {
-    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
+    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.runtime.as_ref())
         .map_err(|e| ProxyError::AuthError(e.to_string()))?;
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
         return Err(ProxyError::AuthError(
@@ -835,7 +836,7 @@ fn log_forward_error(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new();
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -877,10 +878,10 @@ async fn log_usage(
         return;
     }
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new();
 
     let (multiplier, pricing_model_source) =
-        logger.resolve_pricing_config(provider_id, app_type).await;
+        logger.resolve_pricing_config(provider_id, app_type);
     let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
         request_model
     } else {

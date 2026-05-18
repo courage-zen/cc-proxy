@@ -13,8 +13,7 @@ use super::{
     provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore, types::*,
     ProxyError,
 };
-use crate::database::Database;
-use crate::services::ProxyService;
+use crate::store::RuntimeConfig;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{any, get, post},
@@ -29,7 +28,7 @@ use tokio::task::JoinHandle;
 /// 代理服务器状态（共享）
 #[derive(Clone)]
 pub struct ProxyState {
-    pub db: Arc<Database>,
+    pub runtime: Arc<RuntimeConfig>,
     pub config: Arc<RwLock<ProxyConfig>>,
     pub status: Arc<RwLock<ProxyStatus>>,
     pub start_time: Arc<RwLock<Option<std::time::Instant>>>,
@@ -55,16 +54,15 @@ pub struct ProxyServer {
 impl ProxyServer {
     pub fn new(
         config: ProxyConfig,
-        db: Arc<Database>,
+        runtime: Arc<RuntimeConfig>,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
-        let provider_router = Arc::new(ProviderRouter::new(db.clone()));
-        // 创建故障转移切换管理器
-        let proxy_service = Arc::new(ProxyService::new(db.clone()));
-        let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone(), proxy_service));
+        let provider_router = Arc::new(ProviderRouter::new(runtime.clone()));
+        // 创建故障转移切换管理器（简化版，不再依赖 ProxyService/DB）
+        let failover_manager = Arc::new(FailoverSwitchManager::new(runtime.clone()));
 
         let state = ProxyState {
-            db,
+            runtime,
             config: Arc::new(RwLock::new(config.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),

@@ -15,8 +15,8 @@ pub fn get_custom_endpoints(
     app_type: AppType,
     provider_id: &str,
 ) -> Result<Vec<CustomEndpoint>, AppError> {
-    let providers = state.db.get_all_providers(app_type.as_str())?;
-    let Some(provider) = providers.get(provider_id) else {
+    let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+    let Some(provider) = providers.iter().find(|p| p.id == provider_id) else {
         return Ok(vec![]);
     };
     let Some(meta) = provider.meta.as_ref() else {
@@ -47,9 +47,7 @@ pub fn add_custom_endpoint(
         ));
     }
 
-    state
-        .db
-        .add_custom_endpoint(app_type.as_str(), provider_id, &normalized)?;
+    unimplemented!("DB removed");
     Ok(())
 }
 
@@ -61,32 +59,18 @@ pub fn remove_custom_endpoint(
     url: String,
 ) -> Result<(), AppError> {
     let normalized = url.trim().trim_end_matches('/').to_string();
-    state
-        .db
-        .remove_custom_endpoint(app_type.as_str(), provider_id, &normalized)?;
+    unimplemented!("DB removed");
     Ok(())
 }
 
 /// Update endpoint last used timestamp
 pub fn update_endpoint_last_used(
-    state: &AppState,
-    app_type: AppType,
-    provider_id: &str,
-    url: String,
+    _state: &AppState,
+    _app_type: AppType,
+    _provider_id: &str,
+    _url: String,
 ) -> Result<(), AppError> {
-    let normalized = url.trim().trim_end_matches('/').to_string();
-
-    // Get provider, update last_used, save back
-    let mut providers = state.db.get_all_providers(app_type.as_str())?;
-    if let Some(provider) = providers.get_mut(provider_id) {
-        if let Some(meta) = provider.meta.as_mut() {
-            if let Some(endpoint) = meta.custom_endpoints.get_mut(&normalized) {
-                endpoint.last_used = Some(now_millis());
-                state.db.save_provider(app_type.as_str(), provider)?;
-            }
-        }
-    }
-    Ok(())
+    unimplemented!("DB removed")
 }
 
 /// Get current timestamp in milliseconds

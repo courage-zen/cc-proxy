@@ -2,14 +2,11 @@
 //!
 //! 提供 HTTP 代理服务核心逻辑，供 CLI 工具调用。
 
-use std::sync::Arc;
-
 mod app_config;
 mod claude_desktop_config;
 mod claude_mcp;
 mod codex_config;
 mod config;
-mod database;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -30,12 +27,11 @@ pub mod yaml_store;
 pub mod proxy;
 mod services;
 mod settings;
-mod store;
+pub mod store;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
-pub use database::Database;
 pub use error::AppError;
 pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
@@ -45,7 +41,6 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta};
 pub use services::{
-    skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
@@ -55,20 +50,20 @@ pub use store::AppState;
 /// CLI/Kubernetes 入口点
 ///
 /// 在后台守护进程模式下调用，初始化应用状态并返回。
-pub fn init_app() -> Result<AppState, AppError> {
+pub fn init_app_from_config(config_dir: &str) -> Result<AppState, AppError> {
     // 设置 panic hook
     panic_hook::setup_panic_hook();
 
     // 初始化 app config dir
-    let app_config_dir = config::get_app_config_dir();
-    panic_hook::init_app_config_dir(app_config_dir.clone());
+    panic_hook::init_app_config_dir(std::path::PathBuf::from(config_dir));
 
-    // 初始化数据库
-    let db = Database::init().map_err(|e| AppError::Message(format!("数据库初始化失败: {e}")))?;
-    let db = Arc::new(db);
+    // 加载 YAML 配置
+    let store = crate::yaml_store::YamlStore::new(std::path::PathBuf::from(config_dir));
+    let app_config = store.load_config().map_err(|e| AppError::Message(format!("配置加载失败: {e}")))?;
 
-    // 初始化 AppState
-    let app_state = AppState::new(db);
+    // 构建 RuntimeConfig
+    let runtime = crate::store::RuntimeConfig::from_app_config(app_config);
+    let app_state = AppState::from_runtime(runtime);
 
     // 初始化全局 HTTP 客户端（直连，无上游代理）
     if let Err(e) = proxy::http_client::init(None) {
@@ -448,10 +443,9 @@ pub fn run_cli(cli: crate::cli::Cli) -> Result<(), String> {
             match action {
                 FailoverCommands::Switch { name } => {
                     // 初始化应用状态
-                    let app_state = init_app().map_err(|e| e.to_string())?;
-                    let db = app_state.db.clone();
-                    let proxy_service = ProxyService::new(db.clone());
-                    let failover_manager = crate::proxy::failover_switch::FailoverSwitchManager::new(db, Arc::new(proxy_service));
+                    let config_dir_str = config_dir.to_string_lossy().to_string();
+                    let app_state = init_app_from_config(&config_dir_str).map_err(|e| e.to_string())?;
+                    let failover_manager = crate::proxy::failover_switch::FailoverSwitchManager::new(app_state.runtime.clone());
 
                     // 使用 tokio runtime 执行切换
                     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
@@ -494,9 +488,6 @@ pub fn run_cli(cli: crate::cli::Cli) -> Result<(), String> {
 
 /// 启动代理服务器（前台模式）
 fn start_proxy(store: &crate::yaml_store::YamlStore) -> Result<(), Box<dyn std::error::Error>> {
-    // 初始化应用状态（数据库等）
-    let app_state = init_app().map_err(|e| e.to_string())?;
-
     // 加载 YAML 配置
     let config = store.load_config()?;
 
@@ -516,9 +507,9 @@ fn start_proxy(store: &crate::yaml_store::YamlStore) -> Result<(), Box<dyn std::
     println!("Listen: {}:{}", config.proxy.listen, config.proxy.port);
     println!("Mode: {}", config.proxy.mode);
 
-    // 创建并启动代理服务器
-    let db = app_state.db.clone();
-    let _proxy_service = ProxyService::new(db);
+    // 从 YAML 配置构建 RuntimeConfig
+    let runtime = crate::store::RuntimeConfig::from_app_config(config.clone());
+    let runtime = std::sync::Arc::new(runtime);
 
     // 使用 tokio runtime 运行服务器
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
@@ -532,7 +523,7 @@ fn start_proxy(store: &crate::yaml_store::YamlStore) -> Result<(), Box<dyn std::
             ..Default::default()
         };
 
-        let server = ProxyServer::new(proxy_config, app_state.db.clone());
+        let server = ProxyServer::new(proxy_config, runtime);
         let info = server.start().await.expect("Failed to start proxy server");
 
         println!("Proxy server started at {}:{}", info.address, info.port);

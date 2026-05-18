@@ -63,8 +63,8 @@ pub async fn query_usage(
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
     let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-        let provider = providers.get(provider_id).ok_or_else(|| {
+        let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        let provider = providers.iter().find(|p| p.id == provider_id).ok_or_else(|| {
             AppError::localized(
                 "provider.not_found",
                 format!("供应商不存在: {provider_id}"),

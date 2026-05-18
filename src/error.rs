@@ -52,8 +52,6 @@ pub enum AppError {
         zh: String,
         en: String,
     },
-    #[error("数据库错误: {0}")]
-    Database(String),
     #[error("OMO 配置文件不存在")]
     OmoConfigNotFound,
     #[error("所有供应商已熔断，无可用渠道")]
@@ -96,12 +94,6 @@ impl AppError {
 impl<T> From<PoisonError<T>> for AppError {
     fn from(err: PoisonError<T>) -> Self {
         Self::Lock(err.to_string())
-    }
-}
-
-impl From<rusqlite::Error> for AppError {
-    fn from(err: rusqlite::Error) -> Self {
-        Self::Database(err.to_string())
     }
 }
 

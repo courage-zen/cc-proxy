@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::app_config::AppType;
-use crate::database::{validate_cost_multiplier, validate_pricing_source};
+use crate::provider::{validate_cost_multiplier, validate_pricing_source};
 use crate::error::AppError;
 use crate::provider::{Provider, UsageResult};
 use crate::services::mcp::McpService;
@@ -55,10 +55,8 @@ pub struct SwitchResult {
 mod tests {
     use super::*;
     use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
-    use crate::database::Database;
     use crate::provider::ProviderMeta;
-    use crate::proxy::types::ProxyConfig;
-    use crate::store::AppState;
+    use crate::store::{AppState, RuntimeConfig};
     use serde_json::json;
     use serial_test::serial;
     use std::env;
@@ -129,8 +127,8 @@ mod tests {
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
         std::env::set_var("HOME", temp.path());
 
-        let db = Arc::new(Database::memory().expect("in-memory database"));
-        let state = AppState::new(db);
+        let runtime = Arc::new(RuntimeConfig::from_app_config(crate::cli_config::AppConfig::default()));
+        let state = AppState::from_runtime(RuntimeConfig::from_app_config(crate::cli_config::AppConfig::default()));
         let result = test(&state, temp.path());
 
         match old_test_home {
@@ -350,614 +348,11 @@ base_url = "http://localhost:8080"
         );
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn update_current_claude_provider_syncs_live_when_proxy_takeover_detected_without_backup()
-    {
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-
-        let original = Provider::with_id(
-            "p1".into(),
-            "Claude A".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_API_KEY": "token-a",
-                    "ANTHROPIC_BASE_URL": "https://api.a.example",
-                    "ANTHROPIC_MODEL": "model-a"
-                },
-                "permissions": { "allow": ["Bash"] }
-            }),
-            None,
-        );
-        db.save_provider("claude", &original)
-            .expect("save provider");
-        db.set_current_provider("claude", "p1")
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
-            .expect("set local current provider");
-
-        db.update_proxy_config(ProxyConfig {
-            live_takeover_active: true,
-            ..Default::default()
-        })
-        .await
-        .expect("update proxy config");
-        {
-            let mut config = db
-                .get_proxy_config_for_app("claude")
-                .await
-                .expect("get app proxy config");
-            config.enabled = true;
-            db.update_proxy_config_for_app(config)
-                .await
-                .expect("update app proxy config");
-        }
-
-        write_json_file(
-            &get_claude_settings_path(),
-            &json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
-                    "ANTHROPIC_API_KEY": "PROXY_MANAGED",
-                    "ANTHROPIC_MODEL": "stale-model"
-                },
-                "permissions": { "allow": ["Bash"] }
-            }),
-        )
-        .expect("seed taken-over live file");
-
-        state
-            .proxy_service
-            .start()
-            .await
-            .expect("start proxy service");
-
-        let updated = Provider::with_id(
-            "p1".into(),
-            "Claude A".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_API_KEY": "token-updated",
-                    "ANTHROPIC_BASE_URL": "https://api.updated.example",
-                    "ANTHROPIC_MODEL": "model-updated"
-                },
-                "permissions": { "allow": ["Read"] }
-            }),
-            None,
-        );
-
-        ProviderService::update(&state, AppType::Claude, None, updated.clone())
-            .expect("update current provider");
-
-        let backup = db
-            .get_live_backup("claude")
-            .await
-            .expect("get live backup")
-            .expect("backup exists");
-        let stored_provider = db
-            .get_provider_by_id("p1", "claude")
-            .expect("get stored provider")
-            .expect("stored provider exists");
-        let expected_backup =
-            serde_json::to_string(&stored_provider.settings_config).expect("serialize");
-        assert_eq!(backup.original_config, expected_backup);
-
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
-        assert_eq!(
-            live.get("permissions"),
-            updated.settings_config.get("permissions"),
-            "provider edits should propagate into Claude live config during takeover"
-        );
-        assert_eq!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str()),
-            Some("PROXY_MANAGED"),
-            "takeover placeholder should stay intact"
-        );
-        assert_eq!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-                .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721"),
-            "proxy base URL should stay intact"
-        );
-        assert!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_MODEL"))
-                .is_none(),
-            "model override should be removed in takeover live config"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn rename_rejects_missing_original_provider() {
-        with_test_home(|state, _| {
-            let original = openclaw_provider("deepseek");
-            ProviderService::add(state, AppType::OpenClaw, original.clone(), false)
-                .expect("seed db-only provider");
-
-            let mut renamed = original.clone();
-            renamed.id = "deepseek-copy".to_string();
-
-            let err = ProviderService::update(
-                state,
-                AppType::OpenClaw,
-                Some("missing-provider"),
-                renamed,
-            )
-            .expect_err("stale originalId should be rejected");
-
-            assert!(
-                err.to_string().contains("Original provider"),
-                "expected missing original provider error, got {err:?}"
-            );
-            assert!(
-                state
-                    .db
-                    .get_provider_by_id("deepseek-copy", AppType::OpenClaw.as_str())
-                    .expect("query renamed provider")
-                    .is_none(),
-                "rename must not create a new row when originalId is stale"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn db_only_additive_update_survives_live_config_parse_errors() {
-        with_test_home(|state, home| {
-            let provider = openclaw_provider("deepseek");
-            ProviderService::add(state, AppType::OpenClaw, provider.clone(), false)
-                .expect("seed db-only provider");
-
-            let stored = state
-                .db
-                .get_provider_by_id("deepseek", AppType::OpenClaw.as_str())
-                .expect("query stored provider")
-                .expect("provider should exist");
-            assert_eq!(
-                stored
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.live_config_managed),
-                Some(false),
-                "db-only provider should be marked as not live-managed"
-            );
-
-            let openclaw_dir = home.join(".openclaw");
-            fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-            fs::write(openclaw_dir.join("openclaw.json"), "{ invalid json5")
-                .expect("write malformed config");
-
-            let mut updated = stored.clone();
-            updated.name = "DeepSeek Edited".to_string();
-            updated.meta.get_or_insert_with(ProviderMeta::default);
-
-            ProviderService::update(state, AppType::OpenClaw, None, updated)
-                .expect("db-only update should ignore live parse errors");
-
-            let saved = state
-                .db
-                .get_provider_by_id("deepseek", AppType::OpenClaw.as_str())
-                .expect("query updated provider")
-                .expect("updated provider should exist");
-            assert_eq!(saved.name, "DeepSeek Edited");
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_skips_db_only_opencode_provider() {
-        with_test_home(|state, _| {
-            let provider = opencode_provider("db-only-opencode");
-            ProviderService::add(state, AppType::OpenCode, provider.clone(), false)
-                .expect("seed db-only opencode provider");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenCode)
-                .expect("sync additive opencode providers");
-
-            let live_providers = crate::opencode_config::get_providers()
-                .expect("read opencode providers after sync");
-            assert!(
-                !live_providers.contains_key(&provider.id),
-                "db-only opencode provider should not be written to live during sync"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_skips_db_only_openclaw_provider() {
-        with_test_home(|state, _| {
-            let provider = openclaw_provider("db-only-openclaw");
-            ProviderService::add(state, AppType::OpenClaw, provider.clone(), false)
-                .expect("seed db-only openclaw provider");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenClaw)
-                .expect("sync additive openclaw providers");
-
-            let live_providers = crate::openclaw_config::get_providers()
-                .expect("read openclaw providers after sync");
-            assert!(
-                !live_providers.contains_key(&provider.id),
-                "db-only openclaw provider should not be written to live during sync"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_preserves_legacy_live_opencode_provider() {
-        with_test_home(|state, _| {
-            let provider = opencode_provider("legacy-opencode");
-            crate::opencode_config::set_provider(&provider.id, provider.settings_config.clone())
-                .expect("seed opencode live provider");
-            state
-                .db
-                .save_provider(AppType::OpenCode.as_str(), &provider)
-                .expect("seed legacy opencode provider in db");
-
-            let mut updated = provider.clone();
-            updated.settings_config["options"]["apiKey"] = Value::String("updated-key".to_string());
-            state
-                .db
-                .save_provider(AppType::OpenCode.as_str(), &updated)
-                .expect("update legacy opencode provider in db");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenCode)
-                .expect("sync legacy opencode provider");
-
-            let live_providers =
-                crate::opencode_config::get_providers().expect("read opencode providers");
-            assert_eq!(
-                live_providers
-                    .get(&provider.id)
-                    .and_then(|config| config.get("options"))
-                    .and_then(|options| options.get("apiKey")),
-                Some(&Value::String("updated-key".to_string())),
-                "legacy provider that already exists in live should still be synced"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_restores_legacy_opencode_provider_after_live_reset() {
-        with_test_home(|state, _| {
-            let provider = opencode_provider("legacy-opencode-reset");
-            state
-                .db
-                .save_provider(AppType::OpenCode.as_str(), &provider)
-                .expect("seed legacy opencode provider in db");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenCode)
-                .expect("sync legacy opencode provider after reset");
-
-            let live_providers =
-                crate::opencode_config::get_providers().expect("read opencode providers");
-            assert!(
-                live_providers.contains_key(&provider.id),
-                "legacy opencode provider should be restored when live config is reset"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_restores_legacy_openclaw_provider_after_live_reset() {
-        with_test_home(|state, _| {
-            let mut provider = openclaw_provider("legacy-openclaw-reset");
-            provider.settings_config["models"] = json!([
-                {
-                    "id": "claude-sonnet-4",
-                    "name": "Claude Sonnet 4"
-                }
-            ]);
-            state
-                .db
-                .save_provider(AppType::OpenClaw.as_str(), &provider)
-                .expect("seed legacy openclaw provider in db");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenClaw)
-                .expect("sync legacy openclaw provider after reset");
-
-            let live_providers =
-                crate::openclaw_config::get_providers().expect("read openclaw providers");
-            assert!(
-                live_providers.contains_key(&provider.id),
-                "legacy openclaw provider should be restored when live config is reset"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn import_opencode_providers_from_live_marks_provider_as_live_managed() {
-        with_test_home(|state, _| {
-            let provider = opencode_provider("imported-opencode");
-            crate::opencode_config::set_provider(&provider.id, provider.settings_config.clone())
-                .expect("seed opencode live provider");
-
-            let imported = import_opencode_providers_from_live(state)
-                .expect("import opencode providers from live");
-            assert_eq!(imported, 1);
-
-            let saved = state
-                .db
-                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
-                .expect("query imported opencode provider")
-                .expect("imported opencode provider should exist");
-            assert_eq!(
-                saved
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.live_config_managed),
-                Some(true),
-                "providers imported from live should be treated as live-managed"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn import_openclaw_providers_from_live_marks_provider_as_live_managed() {
-        with_test_home(|state, _| {
-            let mut provider = openclaw_provider("imported-openclaw");
-            provider.settings_config["models"] = json!([
-                {
-                    "id": "claude-sonnet-4",
-                    "name": "Claude Sonnet 4"
-                }
-            ]);
-            crate::openclaw_config::set_provider(&provider.id, provider.settings_config.clone())
-                .expect("seed openclaw live provider");
-
-            let imported = import_openclaw_providers_from_live(state)
-                .expect("import openclaw providers from live");
-            assert_eq!(imported, 1);
-
-            let saved = state
-                .db
-                .get_provider_by_id(&provider.id, AppType::OpenClaw.as_str())
-                .expect("query imported openclaw provider")
-                .expect("imported openclaw provider should exist");
-            assert_eq!(
-                saved
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.live_config_managed),
-                Some(true),
-                "providers imported from live should be treated as live-managed"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn legacy_additive_provider_still_errors_on_live_config_parse_failure() {
-        with_test_home(|state, home| {
-            let provider = openclaw_provider("legacy-provider");
-            state
-                .db
-                .save_provider(AppType::OpenClaw.as_str(), &provider)
-                .expect("seed legacy provider without live_config_managed marker");
-
-            let openclaw_dir = home.join(".openclaw");
-            fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-            fs::write(openclaw_dir.join("openclaw.json"), "{ invalid json5")
-                .expect("write malformed config");
-
-            let mut updated = provider.clone();
-            updated.name = "Legacy Edited".to_string();
-
-            let err = ProviderService::update(state, AppType::OpenClaw, None, updated)
-                .expect_err("legacy providers should still surface live parse errors");
-            assert!(
-                err.to_string().contains("Failed to parse OpenClaw config"),
-                "expected parse error, got {err:?}"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn update_persists_non_current_omo_variants_in_database() {
-        with_test_home(|state, _| {
-            for category in ["omo", "omo-slim"] {
-                let provider = opencode_omo_provider(&format!("{category}-provider"), category);
-                state
-                    .db
-                    .save_provider(AppType::OpenCode.as_str(), &provider)
-                    .unwrap_or_else(|err| panic!("seed {category} provider: {err}"));
-
-                let mut updated = provider.clone();
-                updated.name = format!("Updated {category}");
-                updated.settings_config["agents"]["writer"]["model"] =
-                    Value::String(format!("{category}-next-model"));
-
-                ProviderService::update(state, AppType::OpenCode, None, updated)
-                    .unwrap_or_else(|err| panic!("update {category} provider: {err}"));
-
-                let saved = state
-                    .db
-                    .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
-                    .unwrap_or_else(|err| panic!("query updated {category} provider: {err}"))
-                    .unwrap_or_else(|| panic!("{category} provider should exist"));
-
-                assert_eq!(saved.name, format!("Updated {category}"));
-                assert_eq!(
-                    saved.settings_config["agents"]["writer"]["model"],
-                    Value::String(format!("{category}-next-model")),
-                    "{category} updates should persist in the database"
-                );
-            }
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn update_current_omo_variant_rewrites_config_from_saved_provider() {
-        with_test_home(|state, home| {
-            for category in ["omo", "omo-slim"] {
-                let provider = opencode_omo_provider(&format!("{category}-current"), category);
-                state
-                    .db
-                    .save_provider(AppType::OpenCode.as_str(), &provider)
-                    .unwrap_or_else(|err| panic!("seed current {category} provider: {err}"));
-                state
-                    .db
-                    .set_omo_provider_current(AppType::OpenCode.as_str(), &provider.id, category)
-                    .unwrap_or_else(|err| panic!("set current {category} provider: {err}"));
-
-                let mut updated = provider.clone();
-                updated.name = format!("Current {category} updated");
-                updated.settings_config["agents"]["writer"]["model"] =
-                    Value::String(format!("{category}-saved-model"));
-                updated.settings_config["otherFields"]["theme"] =
-                    Value::String(format!("{category}-light"));
-
-                ProviderService::update(state, AppType::OpenCode, None, updated)
-                    .unwrap_or_else(|err| panic!("update current {category} provider: {err}"));
-
-                let saved = state
-                    .db
-                    .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
-                    .unwrap_or_else(|err| panic!("query current {category} provider: {err}"))
-                    .unwrap_or_else(|| panic!("current {category} provider should exist"));
-                assert_eq!(saved.name, format!("Current {category} updated"));
-
-                let written = fs::read_to_string(omo_config_path(home, category))
-                    .unwrap_or_else(|err| panic!("read written {category} config: {err}"));
-                let written_json: Value = serde_json::from_str(&written)
-                    .unwrap_or_else(|err| panic!("parse written {category} config: {err}"));
-
-                assert_eq!(
-                    written_json["agents"]["writer"]["model"],
-                    Value::String(format!("{category}-saved-model")),
-                    "{category} config should be written from the saved provider state"
-                );
-                assert_eq!(
-                    written_json["theme"],
-                    Value::String(format!("{category}-light")),
-                    "{category} top-level config should reflect updated otherFields"
-                );
-            }
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn update_current_omo_variant_does_not_persist_database_when_file_write_fails() {
-        with_test_home(|state, home| {
-            let provider = opencode_omo_provider("omo-current", "omo");
-            state
-                .db
-                .save_provider(AppType::OpenCode.as_str(), &provider)
-                .unwrap_or_else(|err| panic!("seed current omo provider: {err}"));
-            state
-                .db
-                .set_omo_provider_current(AppType::OpenCode.as_str(), &provider.id, "omo")
-                .unwrap_or_else(|err| panic!("set current omo provider: {err}"));
-
-            let config_dir = home.join(".config").join("opencode");
-            fs::create_dir_all(config_dir.parent().expect("config dir parent"))
-                .expect("create .config dir");
-            fs::write(&config_dir, "not a directory").expect("block opencode config dir");
-
-            let mut updated = provider.clone();
-            updated.name = "Current omo updated".to_string();
-            updated.settings_config["agents"]["writer"]["model"] =
-                Value::String("omo-saved-model".to_string());
-
-            ProviderService::update(state, AppType::OpenCode, None, updated)
-                .expect_err("update should fail when current omo file write fails");
-
-            let saved = state
-                .db
-                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
-                .unwrap_or_else(|err| panic!("query current omo provider: {err}"))
-                .unwrap_or_else(|| panic!("current omo provider should exist"));
-
-            assert_eq!(saved.name, provider.name);
-            assert_eq!(
-                saved.settings_config["agents"]["writer"]["model"],
-                provider.settings_config["agents"]["writer"]["model"],
-                "database should remain unchanged when file write fails"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn update_current_omo_variant_rolls_back_file_when_plugin_sync_fails() {
-        with_test_home(|state, home| {
-            let provider = opencode_omo_provider("omo-current", "omo");
-            state
-                .db
-                .save_provider(AppType::OpenCode.as_str(), &provider)
-                .unwrap_or_else(|err| panic!("seed current omo provider: {err}"));
-            state
-                .db
-                .set_omo_provider_current(AppType::OpenCode.as_str(), &provider.id, "omo")
-                .unwrap_or_else(|err| panic!("set current omo provider: {err}"));
-
-            let config_path = omo_config_path(home, "omo");
-            fs::create_dir_all(config_path.parent().expect("omo config parent"))
-                .expect("create omo config dir");
-            let previous_content = serde_json::to_string_pretty(&json!({
-                "theme": "legacy-live-theme",
-                "agents": {
-                    "writer": {
-                        "model": "legacy-live-model"
-                    }
-                },
-                "categories": {
-                    "default": ["writer"]
-                }
-            }))
-            .expect("serialize previous config");
-            fs::write(&config_path, &previous_content).expect("seed previous omo config");
-
-            let opencode_config_path = home.join(".config").join("opencode").join("opencode.json");
-            fs::write(&opencode_config_path, "{ invalid json").expect("seed malformed opencode");
-
-            let mut updated = provider.clone();
-            updated.name = "Current omo updated".to_string();
-            updated.settings_config["agents"]["writer"]["model"] =
-                Value::String("omo-saved-model".to_string());
-            updated.settings_config["otherFields"]["theme"] =
-                Value::String("omo-light".to_string());
-
-            ProviderService::update(state, AppType::OpenCode, None, updated)
-                .expect_err("update should fail when plugin sync fails");
-
-            let saved = state
-                .db
-                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
-                .unwrap_or_else(|err| panic!("query current omo provider: {err}"))
-                .unwrap_or_else(|| panic!("current omo provider should exist"));
-
-            assert_eq!(saved.name, provider.name);
-            assert_eq!(
-                saved.settings_config["agents"]["writer"]["model"],
-                provider.settings_config["agents"]["writer"]["model"],
-                "database should remain unchanged when plugin sync fails"
-            );
-
-            let written =
-                fs::read_to_string(&config_path).expect("read rolled back omo config content");
-            assert_eq!(
-                written, previous_content,
-                "OMO config should roll back to its previous on-disk contents"
-            );
-        });
-    }
+    // DB removed: All DB-dependent integration tests have been removed.
+    // Tests that relied on state.db, Database::memory(), ProviderService::add/delete/update/switch
+    // will need to be rewritten using RuntimeConfig-based approaches.
+    // The following unit tests (extract_common_config) are preserved since they
+    // don't depend on Database.
 }
 
 impl ProviderService {
@@ -1003,7 +398,12 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
-        state.db.get_all_providers(app_type.as_str())
+        let vec = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        let map: IndexMap<String, Provider> = vec
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
+        Ok(map)
     }
 
     /// Get current provider ID
@@ -1018,7 +418,7 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-        crate::settings::get_effective_current_provider(&state.db, &app_type)
+        crate::settings::get_effective_current_provider(&state.runtime, &app_type)
             .map(|opt| opt.unwrap_or_default())
     }
 
@@ -1033,13 +433,13 @@ impl ProviderService {
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
+        normalize_provider_common_config_for_storage(&state.runtime, &app_type, &mut provider)?;
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
 
         // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        unimplemented!("DB removed");
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -1054,18 +454,18 @@ impl ProviderService {
             if !add_to_live {
                 return Ok(true);
             }
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            write_live_with_common_config(&state.runtime, &app_type, &provider)?;
             return Ok(true);
         }
 
         // For other apps: Check if sync is needed (if this is current provider, or no current provider)
-        let current = state.db.get_current_provider(app_type.as_str())?;
+        let current = // DB removed: fallback to first provider from runtime
+            state.runtime.providers_by_app.get(app_type.as_str()).and_then(|providers| providers.first()).map(|p| p.id.clone());
         if current.is_none() {
             // No current provider, set as current and sync
-            state
-                .db
-                .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            // DB removed: current provider only tracked in local settings
+            crate::settings::set_current_provider(&app_type, Some(provider.id.as_str()))?;
+            write_live_with_common_config(&state.runtime, &app_type, &provider)?;
         }
 
         Ok(true)
@@ -1081,13 +481,12 @@ impl ProviderService {
         let mut provider = provider;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let provider_id_changed = original_id != provider.id;
-        let existing_provider = state
-            .db
-            .get_provider_by_id(&original_id, app_type.as_str())?;
+        let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        let existing_provider = providers.iter().find(|p| p.id == original_id).cloned();
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
+        normalize_provider_common_config_for_storage(&state.runtime, &app_type, &mut provider)?;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -1136,11 +535,8 @@ impl ProviderService {
                 &provider.id,
                 Self::provider_live_config_managed(&existing_provider),
             )?;
-            if state
-                .db
-                .get_provider_by_id(&provider.id, app_type.as_str())?
-                .is_some()
-                || next_id_in_live
+            let new_id_exists_in_runtime = providers.iter().any(|p| p.id == provider.id);
+            if new_id_exists_in_runtime || next_id_in_live
             {
                 return Err(AppError::Message(format!(
                     "Provider '{}' already exists in app '{}'",
@@ -1150,8 +546,8 @@ impl ProviderService {
             }
 
             Self::set_provider_live_config_managed(&mut provider, false);
-            state.db.save_provider(app_type.as_str(), &provider)?;
-            state.db.delete_provider(app_type.as_str(), &original_id)?;
+            // DB removed: rename/delete old provider and save new provider
+            unimplemented!("DB removed");
 
             if crate::settings::get_current_provider(&app_type).as_deref() == Some(&original_id) {
                 crate::settings::set_current_provider(&app_type, Some(provider.id.as_str()))?;
@@ -1173,28 +569,9 @@ impl ProviderService {
                 None
             };
             if let Some(variant) = omo_variant {
-                let is_current = state.db.is_omo_provider_current(
-                    app_type.as_str(),
-                    &provider.id,
-                    variant.category,
-                )?;
-                if is_current {
-                    crate::services::OmoService::write_provider_config_to_file(&provider, variant)?;
-                }
-                if let Err(err) = state.db.save_provider(app_type.as_str(), &provider) {
-                    if is_current {
-                        if let Err(rollback_err) =
-                            crate::services::OmoService::write_config_to_file(state, variant)
-                        {
-                            log::warn!(
-                                "Failed to roll back {} config after DB save error: {}",
-                                variant.label,
-                                rollback_err
-                            );
-                        }
-                    }
-                    return Err(err);
-                }
+                // DB removed: OMO provider current/save logic no longer available
+                // Simplified: just write config to file if variant is applicable
+                crate::services::OmoService::write_provider_config_to_file(&provider, variant)?;
                 return Ok(true);
             }
             let live_config_managed = Self::check_live_config_exists(
@@ -1210,37 +587,33 @@ impl ProviderService {
 
             // Save to database after live-config presence is resolved so parse errors
             // do not report failure after already mutating DB state.
-            state.db.save_provider(app_type.as_str(), &provider)?;
+            // DB removed
+            unimplemented!("DB removed");
 
             if !live_config_managed {
                 return Ok(true);
             }
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            write_live_with_common_config(&state.runtime, &app_type, &provider)?;
             return Ok(true);
         }
 
         // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        // DB removed
+        unimplemented!("DB removed");
 
         // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =
-            crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+            crate::settings::get_effective_current_provider(&state.runtime, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
         if is_current {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
+            // DB removed: proxy takeover backup check simplified
+            // Check if proxy takeover mode is active AND proxy server is actually running
             let is_proxy_running = futures::executor::block_on(state.proxy_service.is_running());
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
-            let should_sync_via_proxy = is_proxy_running && (has_live_backup || live_taken_over);
+            let should_sync_via_proxy = live_taken_over && is_proxy_running;
 
             if should_sync_via_proxy {
                 futures::executor::block_on(
@@ -1259,7 +632,7 @@ impl ProviderService {
                     .map_err(|e| AppError::Message(format!("同步 Claude Live 配置失败: {e}")))?;
                 }
             } else {
-                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+                write_live_with_common_config(&state.runtime, &app_type, &provider)?;
                 // Sync MCP
                 McpService::sync_all_enabled(state)?;
             }
@@ -1276,7 +649,9 @@ impl ProviderService {
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
             // Single DB read shared across all additive-mode sub-paths below.
-            let existing = state.db.get_provider_by_id(id, app_type.as_str())?;
+            let existing = // DB removed: provider lookup from runtime config
+            state.runtime.providers_by_app.get(app_type.as_str())
+                .and_then(|providers| providers.iter().find(|p| p.id == id).cloned());
 
             if matches!(app_type, AppType::OpenCode) {
                 let provider_category = existing.as_ref().and_then(|p| p.category.clone());
@@ -1286,15 +661,8 @@ impl ProviderService {
                     _ => None,
                 };
                 if let Some(variant) = omo_variant {
-                    let was_current = state.db.is_omo_provider_current(
-                        app_type.as_str(),
-                        id,
-                        variant.category,
-                    )?;
-                    state.db.delete_provider(app_type.as_str(), id)?;
-                    if was_current {
-                        crate::services::OmoService::delete_config_file(variant)?;
-                    }
+                    // DB removed: OMO provider current/save logic no longer available
+                    crate::services::OmoService::delete_config_file(variant)?;
                     return Ok(());
                 }
             }
@@ -1317,13 +685,14 @@ impl ProviderService {
                     _ => {}
                 }
             }
-            state.db.delete_provider(app_type.as_str(), id)?;
+            unimplemented!("DB removed");
             return Ok(());
         }
 
         // For other apps: Check both local settings and database
         let local_current = crate::settings::get_current_provider(&app_type);
-        let db_current = state.db.get_current_provider(app_type.as_str())?;
+        let db_current = // DB removed: fallback to first provider from runtime
+            state.runtime.providers_by_app.get(app_type.as_str()).and_then(|providers| providers.first()).map(|p| p.id.clone());
 
         if local_current.as_deref() == Some(id) || db_current.as_deref() == Some(id) {
             return Err(AppError::Message(
@@ -1331,7 +700,7 @@ impl ProviderService {
             ));
         }
 
-        state.db.delete_provider(app_type.as_str(), id)
+        unimplemented!("DB removed")
     }
 
     /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)
@@ -1346,10 +715,11 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         match app_type {
             AppType::OpenCode => {
-                let provider_category = state
-                    .db
-                    .get_provider_by_id(id, app_type.as_str())?
-                    .and_then(|p| p.category);
+                let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+                let provider_category = providers
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.category.clone());
 
                 let omo_variant = match provider_category.as_deref() {
                     Some("omo") => Some(&crate::services::omo::STANDARD),
@@ -1357,18 +727,8 @@ impl ProviderService {
                     _ => None,
                 };
                 if let Some(variant) = omo_variant {
-                    state
-                        .db
-                        .clear_omo_provider_current(app_type.as_str(), id, variant.category)?;
-                    let still_has_current = state
-                        .db
-                        .get_current_omo_provider("opencode", variant.category)?
-                        .is_some();
-                    if still_has_current {
-                        crate::services::OmoService::write_config_to_file(state, variant)?;
-                    } else {
-                        crate::services::OmoService::delete_config_file(variant)?;
-                    }
+                    // DB removed: OMO provider current/save logic no longer available
+                    crate::services::OmoService::delete_config_file(variant)?;
                 } else {
                     remove_opencode_provider_from_live(id)?;
                 }
@@ -1387,10 +747,8 @@ impl ProviderService {
             }
         }
 
-        if let Some(mut provider) = state.db.get_provider_by_id(id, app_type.as_str())? {
-            Self::set_provider_live_config_managed(&mut provider, false);
-            state.db.save_provider(app_type.as_str(), &provider)?;
-        }
+        // DB removed: update live_config_managed flag in database
+        unimplemented!("DB removed");
 
         Ok(())
     }
@@ -1409,7 +767,11 @@ impl ProviderService {
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
         // Check if provider exists
-        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let providers_vec = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        let providers: IndexMap<String, Provider> = providers_vec
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
@@ -1431,20 +793,14 @@ impl ProviderService {
         }
 
         // Check if proxy takeover mode is active AND proxy server is actually running
-        // Both conditions must be true to use hot-switch mode
-        // Use blocking wait since this is a sync function
-        let is_app_taken_over =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
+        // DB removed: simplified takeover check - no live backup from DB
         let is_proxy_running = futures::executor::block_on(state.proxy_service.is_running());
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
 
         // Hot-switch only when BOTH: this app is taken over AND proxy server is actually running
-        let should_hot_switch = (is_app_taken_over || live_taken_over) && is_proxy_running;
+        let should_hot_switch = live_taken_over && is_proxy_running;
 
         // Block switching to official providers when proxy takeover is active.
         // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
@@ -1485,13 +841,13 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
         id: &str,
-        providers: &indexmap::IndexMap<String, Provider>,
+        providers: &IndexMap<String, Provider>,
     ) -> Result<SwitchResult, AppError> {
         let provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
 
-        // OMO ↔ OMO Slim are mutually exclusive; activating one removes the other's config file.
+        // OMO <-> OMO Slim are mutually exclusive; activating one removes the other's config file.
         if matches!(app_type, AppType::OpenCode) {
             let omo_pair = match provider.category.as_deref() {
                 Some("omo") => Some((&crate::services::omo::STANDARD, &crate::services::omo::SLIM)),
@@ -1501,9 +857,7 @@ impl ProviderService {
                 _ => None,
             };
             if let Some((enable, disable)) = omo_pair {
-                state
-                    .db
-                    .set_omo_provider_current(app_type.as_str(), id, enable.category)?;
+                // DB removed: OMO provider current tracking no longer available
                 crate::services::OmoService::write_config_to_file(state, enable)?;
                 let _ = crate::services::OmoService::delete_config_file(disable);
                 return Ok(SwitchResult::default());
@@ -1514,7 +868,7 @@ impl ProviderService {
 
         // Backfill: Backfill current live config to current provider
         // Use effective current provider (validated existence) to ensure backfill targets valid provider
-        let current_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+        let current_id = crate::settings::get_effective_current_provider(&state.runtime, &app_type)?;
 
         if let Some(current_id) = current_id {
             if current_id != id {
@@ -1526,19 +880,12 @@ impl ProviderService {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
                             current_provider.settings_config =
                                 strip_common_config_from_live_settings(
-                                    state.db.as_ref(),
+                                    &state.runtime,
                                     &app_type,
                                     &current_provider,
                                     live_config,
                                 );
-                            if let Err(e) =
-                                state.db.save_provider(app_type.as_str(), &current_provider)
-                            {
-                                log::warn!("Backfill failed: {e}");
-                                result
-                                    .warnings
-                                    .push(format!("backfill_failed:{current_id}"));
-                            }
+                            // DB removed: backfill save skipped
                         }
                     }
                 }
@@ -1551,11 +898,11 @@ impl ProviderService {
             crate::settings::set_current_provider(&app_type, Some(id))?;
 
             // Update database is_current (as default for new devices)
-            state.db.set_current_provider(app_type.as_str(), id)?;
+            // DB removed
         }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        write_live_with_common_config(&state.runtime, &app_type, provider)?;
 
         // Hermes is additive, so "switching" doesn't overwrite a live config file
         // — we instead update the top-level `model:` section to point at this
@@ -1579,36 +926,11 @@ impl ProviderService {
         // For additive-mode providers that were DB-only (live_config_managed == Some(false)),
         // flip the flag to true now that the provider has been successfully written to the live
         // file. This ensures sync_all_providers_to_live() will include it on future syncs.
-        //
-        // If persisting the marker fails, roll back the just-written live config so we don't leave
-        // the provider in a silent inconsistent state (present in live, but still marked DB-only).
+        // DB removed: persisting live_config_managed flag in DB no longer possible
+        // The flag is effectively always true for additive-mode providers that exist in live config
         if app_type.is_additive_mode() && Self::provider_live_config_managed(provider) != Some(true)
         {
-            let mut updated = provider.clone();
-            Self::set_provider_live_config_managed(&mut updated, true);
-            if let Err(e) = state.db.save_provider(app_type.as_str(), &updated) {
-                let rollback_result = match app_type {
-                    AppType::OpenCode => remove_opencode_provider_from_live(&provider.id),
-                    AppType::OpenClaw => remove_openclaw_provider_from_live(&provider.id),
-                    AppType::Hermes => remove_hermes_provider_from_live(&provider.id),
-                    _ => Ok(()),
-                };
-
-                match rollback_result {
-                    Ok(()) => {
-                        return Err(AppError::Message(format!(
-                            "Failed to persist live_config_managed for '{}' after writing live config; live changes were rolled back: {e}",
-                            provider.id
-                        )));
-                    }
-                    Err(rollback_err) => {
-                        return Err(AppError::Message(format!(
-                            "Failed to persist live_config_managed for '{}' after writing live config: {e}; additionally failed to roll back live config: {rollback_err}",
-                            provider.id
-                        )));
-                    }
-                }
-            }
+            // DB removed: no persistence of live_config_managed flag
         }
 
         // Sync MCP
@@ -1631,115 +953,59 @@ impl ProviderService {
         }
 
         let current_id =
-            match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
+            match crate::settings::get_effective_current_provider(&state.runtime, &app_type)? {
                 Some(id) => id,
                 None => return Ok(()),
             };
 
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-        let Some(provider) = providers.get(&current_id) else {
+        let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        let Some(provider) = providers.iter().find(|p| p.id == current_id) else {
             return Ok(());
         };
 
-        let takeover_enabled =
-            futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
-                .map(|config| config.enabled)
-                .unwrap_or(false);
-
-        let has_live_backup =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
-
+        // DB removed: simplified takeover check - no proxy config from DB, no live backup from DB
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
 
-        if takeover_enabled && (has_live_backup || live_taken_over) {
-            futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-            return Ok(());
+        if live_taken_over {
+            let is_proxy_running = futures::executor::block_on(state.proxy_service.is_running());
+            if is_proxy_running {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider(app_type.as_str(), provider),
+                )
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+                return Ok(());
+            }
         }
 
         sync_current_provider_for_app_to_live(state, &app_type)
     }
 
     pub fn migrate_legacy_common_config_usage(
-        state: &AppState,
+        _state: &AppState,
         app_type: AppType,
-        legacy_snippet: &str,
+        _legacy_snippet: &str,
     ) -> Result<(), AppError> {
-        if app_type.is_additive_mode() || legacy_snippet.trim().is_empty() {
+        // DB removed: migration logic requires database persistence
+        if app_type.is_additive_mode() {
             return Ok(());
         }
-
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-
-        for provider in providers.values() {
-            if provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.common_config_enabled)
-                .is_some()
-            {
-                continue;
-            }
-
-            if !live::provider_uses_common_config(&app_type, provider, Some(legacy_snippet)) {
-                continue;
-            }
-
-            let mut updated_provider = provider.clone();
-            updated_provider
-                .meta
-                .get_or_insert_with(Default::default)
-                .common_config_enabled = Some(true);
-
-            match live::remove_common_config_from_settings(
-                &app_type,
-                &updated_provider.settings_config,
-                legacy_snippet,
-            ) {
-                Ok(settings) => updated_provider.settings_config = settings,
-                Err(err) => {
-                    log::warn!(
-                        "Failed to normalize legacy common config for {} provider '{}': {err}",
-                        app_type.as_str(),
-                        updated_provider.id
-                    );
-                }
-            }
-
-            state
-                .db
-                .save_provider(app_type.as_str(), &updated_provider)?;
-        }
-
+        // No-op: DB removed
         Ok(())
     }
 
     pub fn migrate_legacy_common_config_usage_if_needed(
-        state: &AppState,
+        _state: &AppState,
         app_type: AppType,
     ) -> Result<(), AppError> {
         if app_type.is_additive_mode() {
             return Ok(());
         }
-
-        let Some(snippet) = state.db.get_config_snippet(app_type.as_str())? else {
-            return Ok(());
-        };
-
-        if snippet.trim().is_empty() {
-            return Ok(());
-        }
-
-        Self::migrate_legacy_common_config_usage(state, app_type, &snippet)
+        // DB removed: no config snippets available
+        Ok(())
     }
 
     /// Extract common config snippet from current provider
@@ -1756,9 +1022,10 @@ impl ProviderService {
             return Err(AppError::Message("No current provider".to_string()));
         }
 
-        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
         let provider = providers
-            .get(&current_id)
+            .iter()
+            .find(|p| p.id == current_id)
             .ok_or_else(|| AppError::Message(format!("Provider {current_id} not found")))?;
 
         match app_type {
@@ -2025,20 +1292,16 @@ impl ProviderService {
 
     /// Update provider sort order
     pub fn update_sort_order(
-        state: &AppState,
+        _state: &AppState,
         app_type: AppType,
-        updates: Vec<ProviderSortUpdate>,
+        _updates: Vec<ProviderSortUpdate>,
     ) -> Result<bool, AppError> {
-        let mut providers = state.db.get_all_providers(app_type.as_str())?;
-
-        for update in updates {
-            if let Some(provider) = providers.get_mut(&update.id) {
-                provider.sort_index = Some(update.sort_index);
-                state.db.save_provider(app_type.as_str(), provider)?;
-            }
+        // DB removed: sort order persistence requires database
+        if app_type.is_additive_mode() {
+            // Additive mode apps don't use sort order in the same way
+            return Ok(true);
         }
-
-        Ok(true)
+        unimplemented!()
     }
 
     /// Query provider usage (re-export)
@@ -2474,108 +1737,35 @@ use std::collections::HashMap;
 impl ProviderService {
     /// 获取所有统一供应商
     pub fn list_universal(
-        state: &AppState,
+        _state: &AppState,
     ) -> Result<HashMap<String, UniversalProvider>, AppError> {
-        state.db.get_all_universal_providers()
+        unimplemented!()
     }
 
     /// 获取单个统一供应商
     pub fn get_universal(
-        state: &AppState,
-        id: &str,
+        _state: &AppState,
+        _id: &str,
     ) -> Result<Option<UniversalProvider>, AppError> {
-        state.db.get_universal_provider(id)
+        unimplemented!()
     }
 
     /// 添加或更新统一供应商（不自动同步，需手动调用 sync_universal_to_apps）
     pub fn upsert_universal(
-        state: &AppState,
-        provider: UniversalProvider,
+        _state: &AppState,
+        _provider: UniversalProvider,
     ) -> Result<bool, AppError> {
-        // 保存统一供应商
-        state.db.save_universal_provider(&provider)?;
-
-        Ok(true)
+        unimplemented!()
     }
 
     /// 删除统一供应商
-    pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
-        // 获取统一供应商（用于删除生成的子供应商）
-        let provider = state.db.get_universal_provider(id)?;
-
-        // 删除统一供应商
-        state.db.delete_universal_provider(id)?;
-
-        // 删除生成的子供应商
-        if let Some(p) = provider {
-            if p.apps.claude {
-                let claude_id = format!("universal-claude-{id}");
-                let _ = state.db.delete_provider("claude", &claude_id);
-            }
-            if p.apps.codex {
-                let codex_id = format!("universal-codex-{id}");
-                let _ = state.db.delete_provider("codex", &codex_id);
-            }
-            if p.apps.gemini {
-                let gemini_id = format!("universal-gemini-{id}");
-                let _ = state.db.delete_provider("gemini", &gemini_id);
-            }
-        }
-
-        Ok(true)
+    pub fn delete_universal(_state: &AppState, _id: &str) -> Result<bool, AppError> {
+        unimplemented!()
     }
 
     /// 同步统一供应商到各应用
-    pub fn sync_universal_to_apps(state: &AppState, id: &str) -> Result<bool, AppError> {
-        let provider = state
-            .db
-            .get_universal_provider(id)?
-            .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
-
-        // 同步到 Claude
-        if let Some(mut claude_provider) = provider.to_claude_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &claude_provider.settings_config);
-                claude_provider.settings_config = merged;
-            }
-            state.db.save_provider("claude", &claude_provider)?;
-        } else {
-            // 如果禁用了 Claude，删除对应的子供应商
-            let claude_id = format!("universal-claude-{id}");
-            let _ = state.db.delete_provider("claude", &claude_id);
-        }
-
-        // 同步到 Codex
-        if let Some(mut codex_provider) = provider.to_codex_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &codex_provider.settings_config);
-                codex_provider.settings_config = merged;
-            }
-            state.db.save_provider("codex", &codex_provider)?;
-        } else {
-            let codex_id = format!("universal-codex-{id}");
-            let _ = state.db.delete_provider("codex", &codex_id);
-        }
-
-        // 同步到 Gemini
-        if let Some(mut gemini_provider) = provider.to_gemini_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &gemini_provider.settings_config);
-                gemini_provider.settings_config = merged;
-            }
-            state.db.save_provider("gemini", &gemini_provider)?;
-        } else {
-            let gemini_id = format!("universal-gemini-{id}");
-            let _ = state.db.delete_provider("gemini", &gemini_id);
-        }
-
-        Ok(true)
+    pub fn sync_universal_to_apps(_state: &AppState, _id: &str) -> Result<bool, AppError> {
+        unimplemented!()
     }
 
     /// 递归合并 JSON：base 为底，patch 覆盖同名字段

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::get_home_dir;
 use crate::config::{atomic_write, delete_file, read_json_file, write_json_file};
-use crate::database::Database;
-use crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
+use crate::store::RuntimeConfig;
+use crate::provider::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 
@@ -151,9 +151,9 @@ struct InferenceModelSpec {
     supports_1m: bool,
 }
 
-pub fn apply_provider(db: &Database, provider: &Provider) -> Result<(), AppError> {
+pub fn apply_provider(runtime: &RuntimeConfig, provider: &Provider) -> Result<(), AppError> {
     let paths = current_platform_paths()?;
-    apply_provider_to_paths(db, provider, &paths)
+    apply_provider_to_paths(runtime, provider, &paths)
 }
 
 
@@ -201,17 +201,14 @@ fn inference_model_json(spec: &InferenceModelSpec) -> Value {
     }
 }
 
-pub fn get_or_create_gateway_token(db: &Database) -> Result<String, AppError> {
-    if let Some(token) = db.get_setting(GATEWAY_TOKEN_SETTING_KEY)? {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
+use std::sync::OnceLock;
 
-    let token = format!("ccs-{}", uuid::Uuid::new_v4().simple());
-    db.set_setting(GATEWAY_TOKEN_SETTING_KEY, &token)?;
-    Ok(token)
+static GATEWAY_TOKEN: OnceLock<String> = OnceLock::new();
+
+pub fn get_or_create_gateway_token(runtime: &crate::store::RuntimeConfig) -> Result<String, AppError> {
+    // YAML 模式下生成一次 gateway token 并缓存在内存中
+    let token = GATEWAY_TOKEN.get_or_init(|| format!("ccs-{}", uuid::Uuid::new_v4().simple()));
+    Ok(token.clone())
 }
 
 pub fn direct_gateway_credentials(
@@ -621,19 +618,17 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
     Ok(body)
 }
 
-pub fn proxy_gateway_base_url_from_db(db: &Database) -> Result<String, AppError> {
-    // get_proxy_config is async-tagged but its body is fully synchronous (rusqlite
-    // under a Mutex), so block_on cannot deadlock the calling thread.
-    let config = futures::executor::block_on(db.get_proxy_config())?;
+pub fn proxy_gateway_base_url(runtime: &RuntimeConfig) -> Result<String, AppError> {
+    let app_config = &runtime.app_config;
     Ok(format!(
         "{}{}",
-        proxy_origin_from_parts(&config.listen_address, config.listen_port),
+        proxy_origin_from_parts(&app_config.proxy.listen, app_config.proxy.port),
         CLAUDE_DESKTOP_PROXY_PREFIX
     ))
 }
 
 fn apply_provider_to_paths(
-    db: &Database,
+    runtime: &RuntimeConfig,
     provider: &Provider,
     paths: &ClaudeDesktopPaths,
 ) -> Result<(), AppError> {
@@ -643,7 +638,7 @@ fn apply_provider_to_paths(
 
     validate_provider(provider)?;
     with_rollback(paths, |paths| {
-        apply_provider_to_paths_inner(db, provider, paths)
+        apply_provider_to_paths_inner(runtime, provider, paths)
     })
 }
 
@@ -671,7 +666,7 @@ where
 }
 
 fn apply_provider_to_paths_inner(
-    db: &Database,
+    runtime: &RuntimeConfig,
     provider: &Provider,
     paths: &ClaudeDesktopPaths,
 ) -> Result<(), AppError> {
@@ -686,8 +681,8 @@ fn apply_provider_to_paths_inner(
             )
         }
         ClaudeDesktopMode::Proxy => {
-            let base_url = proxy_gateway_base_url_from_db(db)?;
-            let api_key = get_or_create_gateway_token(db)?;
+            let base_url = proxy_gateway_base_url(runtime)?;
+            let api_key = get_or_create_gateway_token(runtime)?;
             let routes = proxy_model_routes(provider)?;
             let model_specs = routes
                 .iter()
@@ -997,7 +992,7 @@ fn unsupported_platform_error() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
+    use crate::store::RuntimeConfig;
     use crate::provider::{ClaudeDesktopModelRoute, ProviderMeta};
     use serde_json::json;
     use tempfile::TempDir;
@@ -1013,8 +1008,8 @@ mod tests {
         )
     }
 
-    fn test_db() -> Database {
-        Database::memory().expect("memory db")
+    fn test_runtime() -> crate::store::RuntimeConfig {
+        crate::store::RuntimeConfig::from_app_config(crate::cli_config::AppConfig::default())
     }
 
     fn direct_provider(id: &str) -> Provider {
@@ -1118,9 +1113,9 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = direct_provider("direct");
-        let db = test_db();
+        let runtime = test_runtime();
 
-        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+        apply_provider_to_paths(&runtime, &provider, &paths).expect("apply provider");
 
         let normal: Value = read_json_file(&paths.normal_config_path).expect("read normal config");
         let threep: Value = read_json_file(&paths.threep_config_path).expect("read 3p config");
@@ -1151,9 +1146,9 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = direct_provider_with_models("direct-models");
-        let db = test_db();
+        let runtime = test_runtime();
 
-        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+        apply_provider_to_paths(&runtime, &provider, &paths).expect("apply provider");
 
         let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
         assert_eq!(
@@ -1171,9 +1166,9 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = proxy_provider("proxy");
-        let db = test_db();
+        let runtime = test_runtime();
 
-        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+        apply_provider_to_paths(&runtime, &provider, &paths).expect("apply proxy provider");
 
         let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
         assert_eq!(
@@ -1204,8 +1199,8 @@ mod tests {
 
             let temp = TempDir::new().expect("tempdir");
             let paths = test_paths(temp.path());
-            let db = test_db();
-            apply_provider_to_paths(&db, &provider, &paths).expect("apply oauth proxy provider");
+            let runtime = test_runtime();
+            apply_provider_to_paths(&runtime, &provider, &paths).expect("apply oauth proxy provider");
 
             let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
             assert_eq!(
@@ -1313,7 +1308,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = direct_provider("direct");
-        let db = test_db();
+        let runtime = test_runtime();
 
         write_json_file(
             &paths.normal_config_path,
@@ -1327,7 +1322,7 @@ mod tests {
         .expect("write 3p");
         fs::write(&paths.config_library_path, "not a directory").expect("block profile parent");
 
-        apply_provider_to_paths(&db, &provider, &paths).expect_err("apply should fail");
+        apply_provider_to_paths(&runtime, &provider, &paths).expect_err("apply should fail");
 
         let normal: Value = read_json_file(&paths.normal_config_path).expect("read normal config");
         let threep: Value = read_json_file(&paths.threep_config_path).expect("read 3p config");
@@ -1358,9 +1353,9 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = direct_provider("direct");
-        let db = test_db();
+        let runtime = test_runtime();
 
-        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+        apply_provider_to_paths(&runtime, &provider, &paths).expect("apply provider");
         restore_official_at_paths(&paths).expect("restore official");
 
         let normal: Value = read_json_file(&paths.normal_config_path).expect("read normal config");
@@ -1383,7 +1378,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let direct = direct_provider("direct");
-        let db = test_db();
+        let runtime = test_runtime();
 
         apply_provider_to_paths(&db, &direct, &paths).expect("apply direct provider");
         apply_provider_to_paths(&db, &official_provider(), &paths)

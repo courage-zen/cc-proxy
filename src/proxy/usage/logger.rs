@@ -1,11 +1,12 @@
 //! Usage Logger - 记录 API 请求使用情况
+//!
+//! YAML 模式下不写 SQLite，改为结构化 JSON 输出到 stdout（由 Docker 日志驱动管理）。
 
 use super::calculator::{CostBreakdown, CostCalculator, ModelPricing};
 use super::parser::TokenUsage;
-use crate::database::{Database, PRICING_SOURCE_REQUEST, PRICING_SOURCE_RESPONSE};
 use crate::error::AppError;
-use crate::services::usage_stats::{find_model_pricing_row, is_placeholder_pricing_model};
 use rust_decimal::Decimal;
+use serde::Serialize;
 use std::str::FromStr;
 
 /// 请求日志
@@ -31,83 +32,85 @@ pub struct RequestLog {
     pub cost_multiplier: String,
 }
 
-/// 使用量记录器
-pub struct UsageLogger<'a> {
-    db: &'a Database,
+/// JSON 日志输出格式
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct JsonLogEntry {
+    log_type: &'static str,
+    request_id: String,
+    provider_id: String,
+    app_type: String,
+    model: String,
+    request_model: String,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_tokens: u32,
+    cache_creation_tokens: u32,
+    input_cost_usd: String,
+    output_cost_usd: String,
+    total_cost_usd: String,
+    latency_ms: u64,
+    first_token_ms: Option<u64>,
+    status_code: u16,
+    error_message: Option<String>,
+    session_id: Option<String>,
+    provider_type: Option<String>,
+    is_streaming: bool,
+    cost_multiplier: String,
 }
 
-impl<'a> UsageLogger<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
+/// 使用量记录器（无 DB 版本，日志输出到 stdout）
+pub struct UsageLogger;
+
+impl UsageLogger {
+    pub fn new() -> Self {
+        Self
     }
 
-    /// 记录成功的请求
+    /// 记录成功的请求 — 输出结构化 JSON 到 stdout
     pub fn log_request(&self, log: &RequestLog) -> Result<(), AppError> {
-        let conn = crate::database::lock_conn!(self.db.conn);
+        let (input_cost, output_cost, total_cost) = if let Some(cost) = &log.cost {
+            (
+                cost.input_cost.to_string(),
+                cost.output_cost.to_string(),
+                cost.total_cost.to_string(),
+            )
+        } else {
+            ("0".to_string(), "0".to_string(), "0".to_string())
+        };
 
-        let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
-            if let Some(cost) = &log.cost {
-                (
-                    cost.input_cost.to_string(),
-                    cost.output_cost.to_string(),
-                    cost.cache_read_cost.to_string(),
-                    cost.cache_creation_cost.to_string(),
-                    cost.total_cost.to_string(),
-                )
-            } else {
-                (
-                    "0".to_string(),
-                    "0".to_string(),
-                    "0".to_string(),
-                    "0".to_string(),
-                    "0".to_string(),
-                )
-            };
+        let entry = JsonLogEntry {
+            log_type: "usage",
+            request_id: log.request_id.clone(),
+            provider_id: log.provider_id.clone(),
+            app_type: log.app_type.clone(),
+            model: log.model.clone(),
+            request_model: log.request_model.clone(),
+            input_tokens: log.usage.input_tokens,
+            output_tokens: log.usage.output_tokens,
+            cache_read_tokens: log.usage.cache_read_tokens,
+            cache_creation_tokens: log.usage.cache_creation_tokens,
+            input_cost_usd: input_cost,
+            output_cost_usd: output_cost,
+            total_cost_usd: total_cost,
+            latency_ms: log.latency_ms,
+            first_token_ms: log.first_token_ms,
+            status_code: log.status_code,
+            error_message: log.error_message.clone(),
+            session_id: log.session_id.clone(),
+            provider_type: log.provider_type.clone(),
+            is_streaming: log.is_streaming,
+            cost_multiplier: log.cost_multiplier.clone(),
+        };
 
-        let created_at = chrono::Utc::now().timestamp();
-
-        conn.execute(
-            "INSERT OR REPLACE INTO proxy_request_logs (
-                request_id, provider_id, app_type, model, request_model,
-                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
-                latency_ms, first_token_ms, status_code, error_message, session_id,
-                provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
-            rusqlite::params![
-                log.request_id,
-                log.provider_id,
-                log.app_type,
-                log.model,
-                log.request_model,
-                log.usage.input_tokens,
-                log.usage.output_tokens,
-                log.usage.cache_read_tokens,
-                log.usage.cache_creation_tokens,
-                input_cost,
-                output_cost,
-                cache_read_cost,
-                cache_creation_cost,
-                total_cost,
-                log.latency_ms as i64,
-                log.first_token_ms.map(|v| v as i64),
-                log.status_code as i64,
-                log.error_message,
-                log.session_id,
-                log.provider_type,
-                log.is_streaming as i64,
-                log.cost_multiplier,
-                created_at,
-            ],
-        )
-        .map_err(|e| AppError::Database(format!("记录请求日志失败: {e}")))?;
+        if let Ok(json) = serde_json::to_string(&entry) {
+            log::info!("[USG] {}", json);
+        }
 
         Ok(())
     }
 
     /// 记录失败的请求
-    ///
-    /// 用于记录无法从上游获取 usage 信息的失败请求
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn log_error(
         &self,
@@ -142,8 +145,6 @@ impl<'a> UsageLogger<'a> {
     }
 
     /// 记录失败的请求（带更多上下文信息）
-    ///
-    /// 相比 log_error，这个方法接受更多参数以提供完整的请求上下文
     #[allow(clippy::too_many_arguments)]
     pub fn log_error_with_context(
         &self,
@@ -180,103 +181,17 @@ impl<'a> UsageLogger<'a> {
         self.log_request(&log)
     }
 
-    /// 获取模型定价
-    pub fn get_model_pricing(&self, model_id: &str) -> Result<Option<ModelPricing>, AppError> {
-        let conn = crate::database::lock_conn!(self.db.conn);
-        let row = find_model_pricing_row(&conn, model_id)?;
-        match row {
-            Some((input, output, cache_read, cache_creation)) => {
-                ModelPricing::from_strings(&input, &output, &cache_read, &cache_creation)
-                    .map(Some)
-                    .map_err(|e| AppError::Database(format!("解析定价数据失败: {e}")))
-            }
-            None => Ok(None),
-        }
+    /// 获取模型定价 — 简化版，使用硬编码的默认定价
+    ///
+    /// YAML 模式下没有 model_pricing 表，返回 None 让成本记录为 0
+    pub fn get_model_pricing(&self, _model_id: &str) -> Result<Option<ModelPricing>, AppError> {
+        Ok(None)
     }
 
-    /// 获取有效的倍率与计费模式来源（供应商优先，未配置则回退全局默认）
-    pub async fn resolve_pricing_config(
-        &self,
-        provider_id: &str,
-        app_type: &str,
-    ) -> (Decimal, String) {
-        let default_multiplier_raw = match self.db.get_default_cost_multiplier(app_type).await {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
-                "1".to_string()
-            }
-        };
-        let default_multiplier = match Decimal::from_str(&default_multiplier_raw) {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!(
-                    "[USG-003] 默认倍率解析失败 (app_type={app_type}): {default_multiplier_raw} - {e}"
-                );
-                Decimal::from(1)
-            }
-        };
-
-        let default_pricing_source_raw = match self.db.get_pricing_model_source(app_type).await {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
-                PRICING_SOURCE_RESPONSE.to_string()
-            }
-        };
-        let default_pricing_source = if default_pricing_source_raw == PRICING_SOURCE_RESPONSE
-            || default_pricing_source_raw == PRICING_SOURCE_REQUEST
-        {
-            default_pricing_source_raw
-        } else {
-            log::warn!(
-                "[USG-003] 默认计费模式无效 (app_type={app_type}): {default_pricing_source_raw}"
-            );
-            PRICING_SOURCE_RESPONSE.to_string()
-        };
-
-        let provider = self
-            .db
-            .get_provider_by_id(provider_id, app_type)
-            .ok()
-            .flatten();
-
-        let (provider_multiplier, provider_pricing_source) = provider
-            .as_ref()
-            .and_then(|p| p.meta.as_ref())
-            .map(|meta| {
-                (
-                    meta.cost_multiplier.as_deref(),
-                    meta.pricing_model_source.as_deref(),
-                )
-            })
-            .unwrap_or((None, None));
-
-        let cost_multiplier = match provider_multiplier {
-            Some(value) => match Decimal::from_str(value) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    log::warn!(
-                        "[USG-003] 供应商倍率解析失败 (provider_id={provider_id}): {value} - {e}"
-                    );
-                    default_multiplier
-                }
-            },
-            None => default_multiplier,
-        };
-
-        let pricing_model_source = match provider_pricing_source {
-            Some(value) if value == PRICING_SOURCE_RESPONSE || value == PRICING_SOURCE_REQUEST => {
-                value.to_string()
-            }
-            Some(value) => {
-                log::warn!("[USG-003] 供应商计费模式无效 (provider_id={provider_id}): {value}");
-                default_pricing_source.clone()
-            }
-            None => default_pricing_source.clone(),
-        };
-
-        (cost_multiplier, pricing_model_source)
+    /// 获取有效的倍率与计费模式来源 — 简化版，固定返回默认值
+    pub fn resolve_pricing_config(&self, _provider_id: &str, _app_type: &str) -> (Decimal, String) {
+        // YAML 模式下默认倍率 1.0，计费模式 response
+        (Decimal::from(1), "response".to_string())
     }
 
     /// 计算并记录请求
@@ -305,8 +220,8 @@ impl<'a> UsageLogger<'a> {
             || usage.cache_read_tokens > 0
             || usage.cache_creation_tokens > 0;
 
-        if pricing.is_none() && has_usage && !is_placeholder_pricing_model(&pricing_model) {
-            log::warn!("[USG-002] 模型定价未找到，成本将记录为 0: {pricing_model}");
+        if pricing.is_none() && has_usage {
+            log::debug!("[USG-002] 模型定价未找到，成本将记录为 0: {pricing_model}");
         }
 
         let cost = CostCalculator::try_calculate_for_app(
@@ -335,96 +250,5 @@ impl<'a> UsageLogger<'a> {
         };
 
         self.log_request(&log)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_log_request() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        // 插入测试定价
-        {
-            let conn = crate::database::lock_conn!(db.conn);
-            conn.execute(
-                "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
-                 VALUES ('test-model', 'Test Model', '3.0', '15.0')",
-                [],
-            )
-            .unwrap();
-        }
-
-        let logger = UsageLogger::new(&db);
-
-        let usage = TokenUsage {
-            input_tokens: 1000,
-            output_tokens: 500,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            model: None,
-            message_id: None,
-        };
-
-        logger.log_with_calculation(
-            "req-123".to_string(),
-            "provider-1".to_string(),
-            "claude".to_string(),
-            "test-model".to_string(),
-            "req-model".to_string(),
-            "test-model".to_string(),
-            usage,
-            Decimal::from(1),
-            100,
-            None,
-            200,
-            None,
-            Some("claude".to_string()),
-            false,
-        )?;
-
-        // 验证记录已插入
-        let conn = crate::database::lock_conn!(db.conn);
-        let (count, request_model): (i64, String) = conn
-            .query_row(
-                "SELECT COUNT(*), request_model FROM proxy_request_logs WHERE request_id = 'req-123'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-        assert_eq!(request_model, "req-model");
-        Ok(())
-    }
-
-    #[test]
-    fn test_log_error() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let logger = UsageLogger::new(&db);
-
-        logger.log_error(
-            "req-error".to_string(),
-            "provider-1".to_string(),
-            "claude".to_string(),
-            "unknown-model".to_string(),
-            500,
-            "Internal Server Error".to_string(),
-            50,
-        )?;
-
-        // 验证错误记录已插入
-        let conn = crate::database::lock_conn!(db.conn);
-        let (status, error): (i64, Option<String>) = conn
-            .query_row(
-                "SELECT status_code, error_message FROM proxy_request_logs WHERE request_id = 'req-error'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(status, 500);
-        assert_eq!(error, Some("Internal Server Error".to_string()));
-        Ok(())
     }
 }

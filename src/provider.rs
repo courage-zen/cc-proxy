@@ -1,7 +1,41 @@
 use indexmap::IndexMap;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::str::FromStr;
+
+/// Claude Desktop official provider ID (moved from database module)
+pub const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
+
+/// Pricing model source constants (moved from database module)
+pub const PRICING_SOURCE_RESPONSE: &str = "response";
+pub const PRICING_SOURCE_REQUEST: &str = "request";
+
+/// Validate cost multiplier string
+pub fn validate_cost_multiplier(value: &str) -> Result<Decimal, crate::error::AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::AppError::Message(
+            "cost_multiplier 不能为空".to_string(),
+        ));
+    }
+    Decimal::from_str(trimmed).map_err(|e| {
+        crate::error::AppError::Message(format!("cost_multiplier 格式无效: {value} - {e}"))
+    })
+}
+
+/// Validate pricing model source string
+pub fn validate_pricing_source(value: &str) -> Result<&str, crate::error::AppError> {
+    let trimmed = value.trim();
+    if trimmed == PRICING_SOURCE_RESPONSE || trimmed == PRICING_SOURCE_REQUEST {
+        Ok(trimmed)
+    } else {
+        Err(crate::error::AppError::Message(format!(
+            "pricingModelSource 必须为 '{PRICING_SOURCE_RESPONSE}' 或 '{PRICING_SOURCE_REQUEST}'，实际值: {value}"
+        )))
+    }
+}
 
 // SSOT 模式：不再写供应商副本文件
 
@@ -43,6 +77,53 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// 从 YAML ProviderConfig 转换为运行时 Provider
+    ///
+    /// 用于 CLI/Docker 场景，从 config.yaml 加载供应商配置
+    pub fn from_yaml_config(config: &crate::cli_config::ProviderConfig) -> Self {
+        let model_map = config.model_map.as_ref();
+        let default_model = model_map
+            .and_then(|m| m.default.as_deref())
+            .unwrap_or_else(|| config.models.first().map(|s| s.as_str()).unwrap_or("unknown"));
+        let haiku = model_map.and_then(|m| m.haiku.as_deref()).unwrap_or(default_model);
+        let sonnet = model_map.and_then(|m| m.sonnet.as_deref()).unwrap_or(default_model);
+        let opus = model_map.and_then(|m| m.opus.as_deref()).unwrap_or(default_model);
+        let api_format = model_map
+            .and_then(|m| m.api_format.as_deref())
+            .unwrap_or("openai_chat");
+
+        // 构建 settings_config — 与 UniversalProvider::to_claude_provider() 格式一致
+        let settings_config = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": config.base_url,
+                "ANTHROPIC_AUTH_TOKEN": config.api_key,
+                "ANTHROPIC_MODEL": default_model,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
+            }
+        });
+
+        let mut meta = ProviderMeta::default();
+        meta.api_format = Some(api_format.to_string());
+        meta.provider_type = Some(config.provider_type.clone());
+
+        Self {
+            id: format!("yaml-{}", config.name),
+            name: config.name.clone(),
+            settings_config,
+            website_url: None,
+            category: Some("yaml".to_string()),
+            created_at: None,
+            sort_index: Some(config.priority as usize),
+            notes: None,
+            meta: Some(meta),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: config.enabled,
+        }
+    }
+
     /// 从现有ID创建供应商
     pub fn with_id(
         id: String,
