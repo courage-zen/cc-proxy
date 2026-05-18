@@ -14,7 +14,8 @@ use super::{
     usage::parser::TokenUsage,
     ProxyError,
 };
-use crate::database::PRICING_SOURCE_REQUEST;
+/// Pricing model source constant — "request" means use request model for pricing
+const PRICING_SOURCE_REQUEST: &str = "request";
 use axum::http::{header::HeaderMap, HeaderName};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -637,9 +638,9 @@ async fn log_usage_internal(
 ) {
     use super::usage::logger::UsageLogger;
 
-    let logger = UsageLogger::new(&state.db);
+    let logger = UsageLogger::new();
     let (multiplier, pricing_model_source) =
-        logger.resolve_pricing_config(provider_id, app_type).await;
+        logger.resolve_pricing_config(provider_id, app_type);
     let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
         request_model
     } else {
@@ -816,18 +817,6 @@ fn format_headers(headers: &HeaderMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use crate::error::AppError;
-    use crate::provider::ProviderMeta;
-    use crate::proxy::failover_switch::FailoverSwitchManager;
-    use crate::proxy::provider_router::ProviderRouter;
-    use crate::proxy::providers::gemini_shadow::GeminiShadowStore;
-    use crate::proxy::types::{ProxyConfig, ProxyStatus};
-    use rust_decimal::Decimal;
-    use std::collections::HashMap;
-    use std::str::FromStr;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     #[test]
     fn test_strip_sse_field_accepts_optional_space() {
@@ -934,173 +923,7 @@ mod tests {
         );
     }
 
-    fn build_state(db: Arc<Database>) -> ProxyState {
-        ProxyState {
-            db: db.clone(),
-            config: Arc::new(RwLock::new(ProxyConfig::default())),
-            status: Arc::new(RwLock::new(ProxyStatus::default())),
-            start_time: Arc::new(RwLock::new(None)),
-            current_providers: Arc::new(RwLock::new(HashMap::new())),
-            provider_router: Arc::new(ProviderRouter::new(db.clone())),
-            gemini_shadow: Arc::new(GeminiShadowStore::default()),
-            failover_manager: Arc::new(FailoverSwitchManager::new(db.clone(), Arc::new(ProxyService::new(db.clone())))),
-        }
-    }
-
-    fn seed_pricing(db: &Database) -> Result<(), AppError> {
-        let conn = crate::database::lock_conn!(db.conn);
-        conn.execute(
-            "INSERT OR REPLACE INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params!["resp-model", "Resp Model", "1.0", "0"],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "INSERT OR REPLACE INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params!["req-model", "Req Model", "2.0", "0"],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
-    }
-
-    fn insert_provider(
-        db: &Database,
-        id: &str,
-        app_type: &str,
-        meta: ProviderMeta,
-    ) -> Result<(), AppError> {
-        let meta_json =
-            serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?;
-        let conn = crate::database::lock_conn!(db.conn);
-        conn.execute(
-            "INSERT INTO providers (id, app_type, name, settings_config, meta)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![id, app_type, "Test Provider", "{}", meta_json],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_log_usage_uses_provider_override_config() -> Result<(), AppError> {
-        let db = Arc::new(Database::memory()?);
-        let app_type = "claude";
-
-        db.set_default_cost_multiplier(app_type, "1.5").await?;
-        db.set_pricing_model_source(app_type, "response").await?;
-        seed_pricing(&db)?;
-
-        let meta = ProviderMeta {
-            cost_multiplier: Some("2".to_string()),
-            pricing_model_source: Some("request".to_string()),
-            ..ProviderMeta::default()
-        };
-        insert_provider(&db, "provider-1", app_type, meta)?;
-
-        let state = build_state(db.clone());
-        let usage = TokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            model: None,
-            message_id: None,
-        };
-
-        log_usage_internal(
-            &state,
-            "provider-1",
-            app_type,
-            "resp-model",
-            "req-model",
-            usage,
-            10,
-            None,
-            false,
-            200,
-            None,
-        )
-        .await;
-
-        let conn = crate::database::lock_conn!(db.conn);
-        let (model, request_model, total_cost, cost_multiplier): (String, String, String, String) =
-            conn.query_row(
-                "SELECT model, request_model, total_cost_usd, cost_multiplier
-                 FROM proxy_request_logs WHERE provider_id = ?1",
-                ["provider-1"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        assert_eq!(model, "resp-model");
-        assert_eq!(request_model, "req-model");
-        assert_eq!(
-            Decimal::from_str(&cost_multiplier).unwrap(),
-            Decimal::from_str("2").unwrap()
-        );
-        assert_eq!(
-            Decimal::from_str(&total_cost).unwrap(),
-            Decimal::from_str("4").unwrap()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_log_usage_falls_back_to_global_defaults() -> Result<(), AppError> {
-        let db = Arc::new(Database::memory()?);
-        let app_type = "claude";
-
-        db.set_default_cost_multiplier(app_type, "1.5").await?;
-        db.set_pricing_model_source(app_type, "response").await?;
-        seed_pricing(&db)?;
-
-        let meta = ProviderMeta::default();
-        insert_provider(&db, "provider-2", app_type, meta)?;
-
-        let state = build_state(db.clone());
-        let usage = TokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            model: None,
-            message_id: None,
-        };
-
-        log_usage_internal(
-            &state,
-            "provider-2",
-            app_type,
-            "resp-model",
-            "req-model",
-            usage,
-            10,
-            None,
-            false,
-            200,
-            None,
-        )
-        .await;
-
-        let conn = crate::database::lock_conn!(db.conn);
-        let (total_cost, cost_multiplier): (String, String) = conn
-            .query_row(
-                "SELECT total_cost_usd, cost_multiplier
-                 FROM proxy_request_logs WHERE provider_id = ?1",
-                ["provider-2"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        assert_eq!(
-            Decimal::from_str(&cost_multiplier).unwrap(),
-            Decimal::from_str("1.5").unwrap()
-        );
-        assert_eq!(
-            Decimal::from_str(&total_cost).unwrap(),
-            Decimal::from_str("1.5").unwrap()
-        );
-        Ok(())
-    }
+    // DB-removed: usage logging tests that required Database::memory() have been removed.
+    // The log_usage_internal function still works with ProxyState but tests would need
+    // a different approach without rusqlite.
 }

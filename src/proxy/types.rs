@@ -169,29 +169,70 @@ pub struct GlobalProxyConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AppProxyConfig {
     /// 应用类型 (claude/codex/gemini)
+    #[serde(default)]
     pub app_type: String,
     /// 该 app 代理启用开关
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// 该 app 自动故障转移开关
+    #[serde(default = "default_true")]
     pub auto_failover_enabled: bool,
     /// 最大重试次数
+    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     /// 流式首字超时（秒）
+    #[serde(default = "default_streaming_first_byte_timeout_u32")]
     pub streaming_first_byte_timeout: u32,
     /// 流式静默超时（秒）
+    #[serde(default = "default_streaming_idle_timeout_u32")]
     pub streaming_idle_timeout: u32,
     /// 非流式总超时（秒）
+    #[serde(default = "default_non_streaming_timeout_u32")]
     pub non_streaming_timeout: u32,
     /// 熔断失败阈值
+    #[serde(default = "default_circuit_failure_threshold")]
     pub circuit_failure_threshold: u32,
     /// 熔断恢复阈值
+    #[serde(default = "default_circuit_success_threshold")]
     pub circuit_success_threshold: u32,
     /// 熔断恢复等待时间（秒）
+    #[serde(default = "default_circuit_timeout_seconds")]
     pub circuit_timeout_seconds: u32,
     /// 错误率阈值
+    #[serde(default = "default_circuit_error_rate_threshold")]
     pub circuit_error_rate_threshold: f64,
     /// 计算错误率的最小请求数
+    #[serde(default = "default_circuit_min_requests")]
     pub circuit_min_requests: u32,
+}
+
+fn default_max_retries() -> u32 { 3 }
+fn default_streaming_first_byte_timeout_u32() -> u32 { 60 }
+fn default_streaming_idle_timeout_u32() -> u32 { 120 }
+fn default_non_streaming_timeout_u32() -> u32 { 600 }
+fn default_circuit_failure_threshold() -> u32 { 5 }
+fn default_circuit_success_threshold() -> u32 { 3 }
+fn default_circuit_timeout_seconds() -> u32 { 30 }
+fn default_circuit_error_rate_threshold() -> f64 { 0.5 }
+fn default_circuit_min_requests() -> u32 { 10 }
+
+impl Default for AppProxyConfig {
+    fn default() -> Self {
+        Self {
+            app_type: "claude".to_string(),
+            enabled: true,
+            auto_failover_enabled: true,
+            max_retries: default_max_retries(),
+            streaming_first_byte_timeout: default_streaming_first_byte_timeout_u32(),
+            streaming_idle_timeout: default_streaming_idle_timeout_u32(),
+            non_streaming_timeout: default_non_streaming_timeout_u32(),
+            circuit_failure_threshold: default_circuit_failure_threshold(),
+            circuit_success_threshold: default_circuit_success_threshold(),
+            circuit_timeout_seconds: default_circuit_timeout_seconds(),
+            circuit_error_rate_threshold: default_circuit_error_rate_threshold(),
+            circuit_min_requests: default_circuit_min_requests(),
+        }
+    }
 }
 
 /// 整流器配置

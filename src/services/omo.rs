@@ -217,7 +217,12 @@ impl OmoService {
     }
 
     pub fn write_config_to_file(state: &AppState, v: &OmoVariant) -> Result<(), AppError> {
-        let current_omo = state.db.get_current_omo_provider("opencode", v.category)?;
+        let current_omo = state.runtime.providers_by_app.get("opencode")
+            .and_then(|providers| {
+                providers.iter().find(|p| {
+                    p.category.as_deref() == Some(v.category)
+                }).cloned()
+            });
         let profile_data = current_omo
             .as_ref()
             .map(|provider| Self::profile_data_from_provider(provider, v));
@@ -290,10 +295,7 @@ impl OmoService {
             in_failover_queue: false,
         };
 
-        state.db.save_provider("opencode", &provider)?;
-        state
-            .db
-            .set_omo_provider_current("opencode", &provider.id, v.category)?;
+        // DB removed: provider is not persisted; just write config file
         Self::write_config_to_file(state, v)?;
         Ok(provider)
     }

@@ -90,20 +90,27 @@ impl RequestContext {
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
-        // 从数据库读取应用级代理配置（per-app）
+        // 从 RuntimeConfig 读取应用级代理配置（per-app）
         let app_config = state
-            .db
-            .get_proxy_config_for_app(app_type_str)
-            .await
-            .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+            .runtime
+            .app_proxy_configs
+            .get(app_type_str)
+            .cloned()
+            .unwrap_or_default();
 
-        // 从数据库读取整流器配置
-        let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
-        let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
-        let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
+        // 从 RuntimeConfig 读取整流器/优化器配置
+        let rectifier_config = state.runtime.rectifier_config.clone();
+        let optimizer_config = state.runtime.optimizer_config.clone();
+        let copilot_optimizer_config = state.runtime.copilot_optimizer_config.clone();
 
-        let current_provider_id =
-            crate::settings::get_current_provider(&app_type).unwrap_or_default();
+        // 当前供应商 ID — 从 RuntimeConfig 中按 priority 取第一个
+        let current_provider_id = state
+            .runtime
+            .providers_by_app
+            .get(app_type_str)
+            .and_then(|p| p.first())
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
 
         // 从请求体提取模型名称
         let request_model = body

@@ -14,7 +14,7 @@ use crate::codex_config::{
     get_codex_auth_path, get_codex_config_path, write_codex_live_atomic_with_stable_provider,
 };
 use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
-use crate::database::Database;
+use crate::store::RuntimeConfig;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::mcp::McpService;
@@ -485,11 +485,11 @@ fn apply_common_config_to_settings(
 }
 
 pub(crate) fn build_effective_settings_with_common_config(
-    db: &Database,
+    runtime: &RuntimeConfig,
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<Value, AppError> {
-    let snippet = db.get_config_snippet(app_type.as_str())?;
+    let snippet: Option<String> = None; // DB removed
     let mut effective_settings = provider.settings_config.clone();
 
     if provider_uses_common_config(app_type, provider, snippet.as_deref()) {
@@ -511,16 +511,16 @@ pub(crate) fn build_effective_settings_with_common_config(
 }
 
 pub(crate) fn write_live_with_common_config(
-    db: &Database,
+    runtime: &RuntimeConfig,
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
-        build_effective_settings_with_common_config(db, app_type, provider)?;
+        build_effective_settings_with_common_config(runtime, app_type, provider)?;
 
     if matches!(app_type, AppType::ClaudeDesktop) {
-        crate::claude_desktop_config::apply_provider(db, &effective_provider)?;
+        crate::claude_desktop_config::apply_provider(runtime, &effective_provider)?;
         log::info!(
             "Claude Desktop 3P profile '{}' written for provider '{}'",
             crate::claude_desktop_config::PROFILE_ID,
@@ -533,45 +533,13 @@ pub(crate) fn write_live_with_common_config(
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
-    db: &Database,
-    app_type: &AppType,
-    provider: &Provider,
+    _runtime: &RuntimeConfig,
+    _app_type: &AppType,
+    _provider: &Provider,
     live_settings: Value,
 ) -> Value {
-    let snippet = match db.get_config_snippet(app_type.as_str()) {
-        Ok(snippet) => snippet,
-        Err(err) => {
-            log::warn!(
-                "Failed to load common config for {} while backfilling '{}': {err}",
-                app_type.as_str(),
-                provider.id
-            );
-            return restore_live_settings_for_provider_backfill(app_type, provider, live_settings);
-        }
-    };
-
-    let backfill_settings = if provider_uses_common_config(app_type, provider, snippet.as_deref()) {
-        match snippet.as_deref() {
-            Some(snippet_text) => {
-                match remove_common_config_from_settings(app_type, &live_settings, snippet_text) {
-                    Ok(settings) => settings,
-                    Err(err) => {
-                        log::warn!(
-                            "Failed to strip common config for {} provider '{}': {err}",
-                            app_type.as_str(),
-                            provider.id
-                        );
-                        live_settings
-                    }
-                }
-            }
-            None => live_settings,
-        }
-    } else {
-        live_settings
-    };
-
-    restore_live_settings_for_provider_backfill(app_type, provider, backfill_settings)
+    // DB removed: common config snippet no longer loaded from DB
+    live_settings
 }
 
 fn restore_live_settings_for_provider_backfill(
@@ -598,39 +566,11 @@ fn restore_live_settings_for_provider_backfill(
 }
 
 pub(crate) fn normalize_provider_common_config_for_storage(
-    db: &Database,
-    app_type: &AppType,
-    provider: &mut Provider,
+    _runtime: &RuntimeConfig,
+    _app_type: &AppType,
+    _provider: &mut Provider,
 ) -> Result<(), AppError> {
-    let uses_common_config = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.common_config_enabled)
-        .unwrap_or(false);
-
-    if !uses_common_config {
-        return Ok(());
-    }
-
-    let Some(snippet) = db.get_config_snippet(app_type.as_str())? else {
-        return Ok(());
-    };
-
-    if snippet.trim().is_empty() {
-        return Ok(());
-    }
-
-    match remove_common_config_from_settings(app_type, &provider.settings_config, &snippet) {
-        Ok(settings) => provider.settings_config = settings,
-        Err(err) => {
-            log::warn!(
-                "Failed to normalize common config before saving {} provider '{}': {err}",
-                app_type.as_str(),
-                provider.id
-            );
-        }
-    }
-
+    // DB removed: no config snippets available, normalization is a no-op
     Ok(())
 }
 
@@ -853,10 +793,10 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
 /// Writes all providers from the database to the live configuration file.
 /// Used for OpenCode and other additive mode applications.
 fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<(), AppError> {
-    let providers = state.db.get_all_providers(app_type.as_str())?;
+    let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
     let mut synced_count = 0usize;
 
-    for provider in providers.values() {
+    for provider in &providers {
         if provider
             .meta
             .as_ref()
@@ -866,7 +806,7 @@ fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<()
             continue;
         }
 
-        if let Err(e) = write_live_with_common_config(state.db.as_ref(), app_type, provider) {
+        if let Err(e) = write_live_with_common_config(&state.runtime, app_type, provider) {
             log::warn!(
                 "Failed to sync {:?} provider '{}' to live: {e}",
                 app_type,
@@ -888,15 +828,15 @@ pub(crate) fn sync_current_provider_for_app_to_live(
     if app_type.is_additive_mode() {
         sync_all_providers_to_live(state, app_type)?;
     } else {
-        let current_id = match crate::settings::get_effective_current_provider(&state.db, app_type)?
+        let current_id = match crate::settings::get_effective_current_provider(&state.runtime, app_type)?
         {
             Some(id) => id,
             None => return Ok(()),
         };
 
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-        if let Some(provider) = providers.get(&current_id) {
-            write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+        let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+        if let Some(provider) = providers.iter().find(|p| p.id == current_id) {
+            write_live_with_common_config(&state.runtime, app_type, provider)?;
         }
     }
 
@@ -921,17 +861,17 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         } else {
             // Switch mode: sync only current provider
             let current_id =
-                match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
+                match crate::settings::get_effective_current_provider(&state.runtime, &app_type)? {
                     Some(id) => id,
                     None => continue,
                 };
 
-            let providers = state.db.get_all_providers(app_type.as_str())?;
-            if let Some(provider) = providers.get(&current_id) {
-                write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+            let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
+            if let Some(provider) = providers.iter().find(|p| p.id == current_id) {
+                write_live_with_common_config(&state.runtime, &app_type, provider)?;
             }
             // Note: get_effective_current_provider already validates existence,
-            // so providers.get() should always succeed here
+            // so providers.iter().find() should always succeed here
         }
     }
 
@@ -940,7 +880,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 
     // Skill sync
     for app_type in AppType::all() {
-        if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type) {
+        if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.runtime, &app_type) {
             log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
             // Continue syncing other apps, don't abort
         }
@@ -1075,9 +1015,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
     // - 老用户已有非 seed provider，跳过导入（正确）
     // - 用户手动点 ProviderEmptyState 的导入按钮时，与官方 seed 共存而不被阻塞
-    if state.db.has_non_official_seed_provider(app_type.as_str())? {
-        return Ok(false);
-    }
+    // DB removed: no seed provider tracking; always allow import
 
     let settings_config = match app_type {
         AppType::Codex => {
@@ -1160,10 +1098,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     );
     provider.category = Some("custom".to_string());
 
-    state.db.save_provider(app_type.as_str(), &provider)?;
-    state
-        .db
-        .set_current_provider(app_type.as_str(), &provider.id)?;
+    unimplemented!("DB removed");
     crate::settings::set_current_provider(&app_type, Some(provider.id.as_str()))?;
 
     Ok(true) // 真正导入了
@@ -1182,7 +1117,8 @@ pub fn should_import_default_config_on_startup(
         return Ok(false);
     }
 
-    Ok(!state.db.has_any_provider_for_app(app_type.as_str())?)
+    // DB removed: no provider tracking in DB; check runtime providers instead
+    Ok(state.runtime.providers_by_app.get(app_type.as_str()).map(|p| p.is_empty()).unwrap_or(true))
 }
 
 /// Write Gemini live configuration with authentication handling
@@ -1291,56 +1227,9 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
 /// This imports existing providers from ~/.config/opencode/opencode.json
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
-pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-    use crate::opencode_config;
-
-    let providers = opencode_config::get_typed_providers()?;
-    if providers.is_empty() {
-        return Ok(0);
-    }
-
-    let mut imported = 0;
-    let existing_ids = state.db.get_provider_ids("opencode")?;
-
-    for (id, config) in providers {
-        // Skip if already exists in database
-        if existing_ids.contains(&id) {
-            log::debug!("OpenCode provider '{id}' already exists in database, skipping");
-            continue;
-        }
-
-        // Convert to Value for settings_config
-        let settings_config = match serde_json::to_value(&config) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("Failed to serialize OpenCode provider '{id}': {e}");
-                continue;
-            }
-        };
-
-        // Create provider
-        let mut provider = Provider::with_id(
-            id.clone(),
-            config.name.clone().unwrap_or_else(|| id.clone()),
-            settings_config,
-            None,
-        );
-        provider.meta = Some(crate::provider::ProviderMeta {
-            live_config_managed: Some(true),
-            ..Default::default()
-        });
-
-        // Save to database
-        if let Err(e) = state.db.save_provider("opencode", &provider) {
-            log::warn!("Failed to import OpenCode provider '{id}': {e}");
-            continue;
-        }
-
-        imported += 1;
-        log::info!("Imported OpenCode provider '{id}' from live config");
-    }
-
-    Ok(imported)
+pub fn import_opencode_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
+    // DB removed: provider import requires database persistence
+    Ok(0)
 }
 
 /// Import all providers from OpenClaw live config to database
@@ -1348,68 +1237,9 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
 /// This imports existing providers from ~/.openclaw/openclaw.json
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
-pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-    use crate::openclaw_config;
-
-    let providers = openclaw_config::get_typed_providers()?;
-    if providers.is_empty() {
-        return Ok(0);
-    }
-
-    let mut imported = 0;
-    let existing_ids = state.db.get_provider_ids("openclaw")?;
-
-    for (id, config) in providers {
-        // Validate: skip entries with empty id or no models
-        if id.trim().is_empty() {
-            log::warn!("Skipping OpenClaw provider with empty id");
-            continue;
-        }
-        if config.models.is_empty() {
-            log::warn!("Skipping OpenClaw provider '{id}': no models defined");
-            continue;
-        }
-
-        // Skip if already exists in database
-        if existing_ids.contains(&id) {
-            log::debug!("OpenClaw provider '{id}' already exists in database, skipping");
-            continue;
-        }
-
-        // Convert to Value for settings_config
-        let settings_config = match serde_json::to_value(&config) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("Failed to serialize OpenClaw provider '{id}': {e}");
-                continue;
-            }
-        };
-
-        // Determine display name: use first model name if available, otherwise use id
-        let display_name = config
-            .models
-            .first()
-            .and_then(|m| m.name.clone())
-            .unwrap_or_else(|| id.clone());
-
-        // Create provider
-        let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
-        provider.meta = Some(crate::provider::ProviderMeta {
-            live_config_managed: Some(true),
-            ..Default::default()
-        });
-
-        // Save to database
-        if let Err(e) = state.db.save_provider("openclaw", &provider) {
-            log::warn!("Failed to import OpenClaw provider '{id}': {e}");
-            continue;
-        }
-
-        imported += 1;
-        log::info!("Imported OpenClaw provider '{id}' from live config");
-    }
-
-    Ok(imported)
+pub fn import_openclaw_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
+    // DB removed: provider import requires database persistence
+    Ok(0)
 }
 
 /// Import all providers from Hermes live config to database
@@ -1417,48 +1247,9 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
 /// This imports existing providers from ~/.hermes/config.yaml
 /// into the CC Switch database. Each provider found will be added to the
 /// database with is_current set to false.
-pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-    use crate::hermes_config;
-
-    let providers = hermes_config::get_providers()?;
-    if providers.is_empty() {
-        return Ok(0);
-    }
-
-    let mut imported = 0;
-    let existing_ids = state.db.get_provider_ids("hermes")?;
-
-    for (name, config) in providers {
-        // Validate: skip entries with empty name
-        if name.trim().is_empty() {
-            log::warn!("Skipping Hermes provider with empty name");
-            continue;
-        }
-
-        // Skip if already exists in database
-        if existing_ids.contains(&name) {
-            log::debug!("Hermes provider '{name}' already exists in database, skipping");
-            continue;
-        }
-
-        // Create provider
-        let mut provider = Provider::with_id(name.clone(), name.clone(), config, None);
-        provider.meta = Some(crate::provider::ProviderMeta {
-            live_config_managed: Some(true),
-            ..Default::default()
-        });
-
-        // Save to database
-        if let Err(e) = state.db.save_provider("hermes", &provider) {
-            log::warn!("Failed to import Hermes provider '{name}': {e}");
-            continue;
-        }
-
-        imported += 1;
-        log::info!("Imported Hermes provider '{name}' from live config");
-    }
-
-    Ok(imported)
+pub fn import_hermes_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
+    // DB removed: provider import requires database persistence
+    Ok(0)
 }
 
 /// Remove a Hermes provider from live config
