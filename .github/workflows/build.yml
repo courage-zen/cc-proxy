@@ -102,11 +102,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./docker
-          file: ./docker/Dockerfile
+          file: ./docker/Dockerfile.gh
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          build-args: |
-            BASE_IMAGE_AMD64=${{ env.REGISTRY }}/${{ github.repository }}/multica-daemon-base:latest
-            BASE_IMAGE_ARM64=${{ env.REGISTRY }}/${{ github.repository }}/multica-daemon-base-arm64:latest
