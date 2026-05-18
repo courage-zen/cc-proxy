@@ -45,10 +45,16 @@ echo "==> Building ${FINAL_IMAGE}:${IMAGE_TAG} (${ARCH})..."
 echo "    Base image: ${BASE_IMAGE}"
 echo "    Binary: ${BINARY}"
 
+if [[ "${ARCH}" == "arm64" ]]; then
+    BASE_ARG="BASE_IMAGE_ARM64=${BASE_IMAGE}"
+else
+    BASE_ARG="BASE_IMAGE_AMD64=${BASE_IMAGE}"
+fi
+
 docker build \
   -f Dockerfile \
-  --build-arg BASE_IMAGE="${BASE_IMAGE}" \
-  --build-arg TARGETARCH="${ARCH}" \
+  --build-arg "${BASE_ARG}" \
+  --build-arg "TARGETARCH=${ARCH}" \
   -t "${FINAL_IMAGE}:${IMAGE_TAG}" \
   .
 
