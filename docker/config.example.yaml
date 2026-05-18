@@ -1,6 +1,9 @@
 # cc-proxy 配置示例
 # 复制此文件并修改 providers 部分，然后挂载到容器中：
 #   docker run -d -v /path/to/your-config:/etc/cc-proxy multica-daemon
+#
+# 注意：挂载目录中除了 config.yaml 外，cc-proxy 还会自动创建 cc-proxy.db 数据库文件。
+# 注意：port 必须为 15721（与 entrypoint 中 Claude CLI 的 apiBaseUrl 端口一致），请勿省略。
 
 proxy:
   listen: "127.0.0.1"    # 容器内监听地址（仅容器内部可访问）
