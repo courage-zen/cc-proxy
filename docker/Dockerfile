@@ -4,7 +4,7 @@
 # Multi-arch build (via GitHub Actions):
 #   docker buildx build --platform linux/amd64,linux/arm64 ...
 
-FROM node:20-bookworm-slim
+FROM node:24-bookworm-slim
 
 # Install Python 3 + git
 RUN apt-get update && apt-get install -y --no-install-recommends \
