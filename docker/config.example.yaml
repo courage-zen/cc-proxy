@@ -1,0 +1,38 @@
+# cc-proxy 配置示例
+# 复制此文件并修改 providers 部分，然后挂载到容器中：
+#   docker run -d -v /path/to/your-config:/etc/cc-proxy multica-daemon
+
+proxy:
+  listen: "127.0.0.1"    # 容器内监听地址（仅容器内部可访问）
+  port: 15721             # 容器内监听端口
+  mode: "global"
+
+failover:
+  enabled: true
+  auto_switch: true
+
+logging:
+  level: "info"
+
+providers:
+  # 示例：OpenAI 格式的 API 代理
+  - name: my-provider
+    type: openai_chat
+    api_key: YOUR_API_KEY_HERE
+    base_url: https://api.example.com
+    models:
+      - claude-sonnet-4-5
+    priority: 1
+    enabled: true
+
+  # 示例：Anthropic 原生格式
+  # - name: anthropic-direct
+  #   type: anthropic
+  #   api_key: YOUR_ANTHROPIC_KEY_HERE
+  #   base_url: https://api.anthropic.com
+  #   models:
+  #     - claude-sonnet-4-5
+  #   priority: 2
+  #   enabled: true
+  #   model_map:
+  #     api_format: anthropic
