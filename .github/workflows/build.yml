@@ -68,18 +68,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: cc-proxy-amd64
-          path: binaries
+          path: binaries/cc-proxy-amd64
 
       - name: Download ARM64 binary
         uses: actions/download-artifact@v4
         with:
           name: cc-proxy-arm64
-          path: binaries
+          path: binaries/cc-proxy-arm64
 
       - name: Rename binaries with arch suffix
         run: |
-          # download-artifact v4 downloads each artifact into its own subdirectory
-          # Structure: binaries/cc-proxy-amd64/cc-proxy and binaries/cc-proxy-arm64/cc-proxy
+          # download-artifact v4 extracts each artifact into its own subdirectory
           mv binaries/cc-proxy-amd64/cc-proxy cc-proxy-amd64
           mv binaries/cc-proxy-arm64/cc-proxy cc-proxy-arm64
           chmod +x cc-proxy-amd64 cc-proxy-arm64
