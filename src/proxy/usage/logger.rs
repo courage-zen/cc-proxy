@@ -1,13 +1,12 @@
 //! Usage Logger - 记录 API 请求使用情况
 //!
-//! YAML 模式下不写 SQLite，改为结构化 JSON 输出到 stdout（由 Docker 日志驱动管理）。
+//! YAML 模式下改为结构化 JSON 输出到 stdout（由 Docker 日志驱动管理）。
 
 use super::calculator::{CostBreakdown, CostCalculator, ModelPricing};
 use super::parser::TokenUsage;
 use crate::error::AppError;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::str::FromStr;
 
 /// 请求日志
 #[derive(Debug, Clone)]
@@ -59,7 +58,7 @@ struct JsonLogEntry {
     cost_multiplier: String,
 }
 
-/// 使用量记录器（无 DB 版本，日志输出到 stdout）
+/// 使用量记录器（日志输出到 stdout）
 pub struct UsageLogger;
 
 impl UsageLogger {

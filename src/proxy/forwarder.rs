@@ -789,12 +789,12 @@ impl RequestForwarder {
 
                     // 先分类错误，决定是否计入 provider 健康度
                     // —— NonRetryable / ClientAbort 是客户端层错误，无论换哪家 provider 都会被拒绝，
-                    //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
+                    //    不应污染熔断器健康度（与 release_permit_neutral 同语义）。
                     let category = self.categorize_proxy_error(&e);
 
                     match category {
                         ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
+                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器
                             let _ = self
                                 .router
                                 .record_result(
@@ -1614,7 +1614,7 @@ impl RequestForwarder {
             ProxyError::StreamIdleTimeout(_) => ErrorCategory::Retryable,
             // 无可用供应商：所有供应商都试过了，无法重试
             ProxyError::NoAvailableProvider => ErrorCategory::NonRetryable,
-            // 其他错误（数据库/内部错误等）：不是换供应商能解决的问题
+            // 其他错误（内部错误等）：不是换供应商能解决的问题
             _ => ErrorCategory::NonRetryable,
         }
     }

@@ -348,7 +348,7 @@ fn write_yaml_section_to_config_locked(
 /// Convert a provider's `models` field from a UI-friendly array to the YAML
 /// dict shape that Hermes expects.
 ///
-/// Input (from CC Switch UI / database):
+/// Input (from CC Switch UI / config):
 /// ```json
 /// "models": [{ "id": "foo", "context_length": 200000 }, { "id": "bar" }]
 /// ```
@@ -1481,7 +1481,7 @@ providers:
     #[test]
     #[serial]
     fn get_providers_heals_legacy_camel_case_on_read() {
-        // A DB may still hold records from older DeepLink imports that wrote
+        // Older DeepLink imports may have written
         // camelCase fields into `settings_config`. The read path must surface
         // them in Hermes' native snake_case so UI editors aren't lying to users.
         with_test_home(|| {

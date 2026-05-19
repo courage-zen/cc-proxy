@@ -489,7 +489,7 @@ pub(crate) fn build_effective_settings_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<Value, AppError> {
-    let snippet: Option<String> = None; // DB removed
+    let snippet: Option<String> = None;
     let mut effective_settings = provider.settings_config.clone();
 
     if provider_uses_common_config(app_type, provider, snippet.as_deref()) {
@@ -538,7 +538,6 @@ pub(crate) fn strip_common_config_from_live_settings(
     _provider: &Provider,
     live_settings: Value,
 ) -> Value {
-    // DB removed: common config snippet no longer loaded from DB
     live_settings
 }
 
@@ -570,7 +569,6 @@ pub(crate) fn normalize_provider_common_config_for_storage(
     _app_type: &AppType,
     _provider: &mut Provider,
 ) -> Result<(), AppError> {
-    // DB removed: no config snippets available, normalization is a no-op
     Ok(())
 }
 
@@ -790,22 +788,13 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
 
 /// Sync all providers to live configuration (for additive mode apps)
 ///
-/// Writes all providers from the database to the live configuration file.
+/// Writes all providers from the runtime config to the live configuration file.
 /// Used for OpenCode and other additive mode applications.
 fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<(), AppError> {
     let providers = state.runtime.providers_by_app.get(app_type.as_str()).cloned().unwrap_or_default();
     let mut synced_count = 0usize;
 
     for provider in &providers {
-        if provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.live_config_managed)
-            == Some(false)
-        {
-            continue;
-        }
-
         if let Err(e) = write_live_with_common_config(&state.runtime, app_type, provider) {
             log::warn!(
                 "Failed to sync {:?} provider '{}' to live: {e}",
@@ -848,8 +837,8 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 /// Sync current provider to live configuration
 ///
 /// 使用有效的当前供应商 ID（验证过存在性）。
-/// 优先从本地 settings 读取，验证后 fallback 到数据库的 is_current 字段。
-/// 这确保了配置导入后无效 ID 会自动 fallback 到数据库。
+/// 优先从本地 settings 读取，验证后 fallback 到 runtime config 的第一个供应商。
+/// 这确保了配置导入后无效 ID 会自动 fallback 到可用供应商。
 ///
 /// For additive mode apps (OpenCode), all providers are synced instead of just the current one.
 pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
@@ -877,14 +866,6 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 
     // MCP sync
     McpService::sync_all_enabled(state)?;
-
-    // Skill sync
-    for app_type in AppType::all() {
-        if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.runtime, &app_type) {
-            log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
-            // Continue syncing other apps, don't abort
-        }
-    }
 
     Ok(())
 }
@@ -1015,8 +996,6 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
     // - 老用户已有非 seed provider，跳过导入（正确）
     // - 用户手动点 ProviderEmptyState 的导入按钮时，与官方 seed 共存而不被阻塞
-    // DB removed: no seed provider tracking; always allow import
-
     let settings_config = match app_type {
         AppType::Codex => {
             let auth_path = get_codex_auth_path();
@@ -1117,7 +1096,6 @@ pub fn should_import_default_config_on_startup(
         return Ok(false);
     }
 
-    // DB removed: no provider tracking in DB; check runtime providers instead
     Ok(state.runtime.providers_by_app.get(app_type.as_str()).map(|p| p.is_empty()).unwrap_or(true))
 }
 
@@ -1222,33 +1200,30 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
     Ok(())
 }
 
-/// Import all providers from OpenCode live config to database
+/// Import all providers from OpenCode live config
 ///
 /// This imports existing providers from ~/.config/opencode/opencode.json
-/// into the CC Switch database. Each provider found will be added to the
-/// database with is_current set to false.
+/// into the runtime config. Each provider found would be added to the
+/// providers list.
 pub fn import_opencode_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
-    // DB removed: provider import requires database persistence
     Ok(0)
 }
 
-/// Import all providers from OpenClaw live config to database
+/// Import all providers from OpenClaw live config
 ///
 /// This imports existing providers from ~/.openclaw/openclaw.json
-/// into the CC Switch database. Each provider found will be added to the
-/// database with is_current set to false.
+/// into the runtime config. Each provider found would be added to the
+/// providers list.
 pub fn import_openclaw_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
-    // DB removed: provider import requires database persistence
     Ok(0)
 }
 
-/// Import all providers from Hermes live config to database
+/// Import all providers from Hermes live config
 ///
 /// This imports existing providers from ~/.hermes/config.yaml
-/// into the CC Switch database. Each provider found will be added to the
-/// database with is_current set to false.
+/// into the runtime config. Each provider found would be added to the
+/// providers list.
 pub fn import_hermes_providers_from_live(_state: &AppState) -> Result<usize, AppError> {
-    // DB removed: provider import requires database persistence
     Ok(0)
 }
 

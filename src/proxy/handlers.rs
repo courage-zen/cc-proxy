@@ -102,7 +102,7 @@ pub async fn handle_claude_desktop_models(
         .provider_router
         .select_providers("claude-desktop")
         .await
-        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+        .map_err(|e| ProxyError::Internal(e.to_string()))?;
     let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
     let response = crate::claude_desktop_config::model_list_response(provider)
         .map_err(|e| ProxyError::ConfigError(e.to_string()))?;

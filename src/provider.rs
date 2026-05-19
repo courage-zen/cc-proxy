@@ -5,10 +5,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// Claude Desktop official provider ID (moved from database module)
+/// Claude Desktop official provider ID
 pub const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
 
-/// Pricing model source constants (moved from database module)
+/// Pricing model source constants
 pub const PRICING_SOURCE_RESPONSE: &str = "response";
 pub const PRICING_SOURCE_REQUEST: &str = "request";
 
@@ -60,7 +60,7 @@ pub struct Provider {
     /// 备注信息
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    /// 供应商元数据（不写入 live 配置，仅存于 ~/.cc-proxy/config.json）
+    /// 供应商元数据（不写入 live 配置，仅在 YAML/config.json 中持久化）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<ProviderMeta>,
     /// 图标名称（如 "openai", "anthropic"）
@@ -397,10 +397,6 @@ pub struct ProviderMeta {
     /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
     #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
     pub codex_fast_mode: Option<bool>,
-    /// 累加模式应用中，该 provider 是否已写入 live config。
-    /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
-    #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
-    pub live_config_managed: Option<bool>,
     /// 供应商类型标识（用于特殊供应商检测）
     /// - "github_copilot": GitHub Copilot 供应商
     #[serde(rename = "providerType", skip_serializing_if = "Option::is_none")]
