@@ -45,9 +45,6 @@ pub enum ProxyError {
     #[error("超过最大重试次数")]
     MaxRetriesExceeded,
 
-    #[error("数据库错误: {0}")]
-    DatabaseError(String),
-
     #[error("配置错误: {0}")]
     ConfigError(String),
 
@@ -71,7 +68,6 @@ pub enum ProxyError {
     #[error("认证失败: {0}")]
     AuthError(String),
 
-    #[allow(dead_code)]
     #[error("内部错误: {0}")]
     Internal(String),
 }
@@ -140,7 +136,7 @@ impl IntoResponse for ProxyError {
                     ProxyError::MaxRetriesExceeded => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
-                    ProxyError::DatabaseError(_) => {
+                    ProxyError::Internal(_) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
                     }
                     ProxyError::ConfigError(_) => (StatusCode::BAD_REQUEST, self.to_string()),

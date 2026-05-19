@@ -51,11 +51,6 @@ cd cc-proxy
 cargo build --release
 ./target/release/cc-proxy start
 
-# Or install via Homebrew (macOS/Linux)
-brew tap farion1231/ccproxy
-brew install cc-proxy
-```
-
 ## CLI Commands
 
 ```bash

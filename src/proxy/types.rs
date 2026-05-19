@@ -117,52 +117,6 @@ pub struct ProxyTakeoverStatus {
     pub openclaw: bool,
 }
 
-/// API 格式类型（预留，当前不需要格式转换）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ApiFormat {
-    Claude,
-    OpenAI,
-    Gemini,
-}
-
-/// Provider健康状态
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderHealth {
-    pub provider_id: String,
-    pub app_type: String,
-    pub is_healthy: bool,
-    pub consecutive_failures: u32,
-    pub last_success_at: Option<String>,
-    pub last_failure_at: Option<String>,
-    pub last_error: Option<String>,
-    pub updated_at: String,
-}
-
-/// Live 配置备份记录
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LiveBackup {
-    /// 应用类型 (claude/codex/gemini)
-    pub app_type: String,
-    /// 原始配置 JSON
-    pub original_config: String,
-    /// 备份时间
-    pub backed_up_at: String,
-}
-
-/// 全局代理配置（统一字段，三行镜像）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GlobalProxyConfig {
-    /// 代理总开关
-    pub proxy_enabled: bool,
-    /// 监听地址
-    pub listen_address: String,
-    /// 监听端口
-    pub listen_port: u16,
-    /// 是否启用日志
-    pub enable_logging: bool,
-}
 
 /// 应用级代理配置（每个 app 独立）
 #[derive(Debug, Clone, Serialize, Deserialize)]

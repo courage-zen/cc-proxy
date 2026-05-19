@@ -1,7 +1,7 @@
 //! Per-app switch lock
 //!
 //! 确保同一应用同时只有一个供应商切换操作在执行，
-//! 防止并发切换导致 is_current 与 Live 备份不一致。
+//! 防止并发切换导致状态不一致。
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -209,13 +209,7 @@ impl ProxyService {
             .to_string()
     }
 
-    pub async fn sync_claude_live_from_provider_while_proxy_active(
-        &self,
-        _provider: &Provider,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     /// 从 AppConfig 构建 ProxyConfig
     fn build_proxy_config(&self) -> ProxyConfig {
         let app = &self.runtime.app_config;
@@ -260,39 +254,7 @@ impl ProxyService {
         Ok(info)
     }
 
-    /// 启动代理服务器（带 Live 配置接管）
-    pub async fn start_with_takeover(&self) -> Result<ProxyServerInfo, String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 获取各应用的接管状态
-    pub async fn get_takeover_status(&self) -> Result<ProxyTakeoverStatus, String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 为指定应用开启/关闭 Live 接管
-    pub async fn set_takeover_for_app(&self, _app_type: &str, _enabled: bool) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 同步 Live 配置中的 Token 到数据库
-    async fn sync_live_to_provider(&self, _app_type: &AppType) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    async fn sync_live_config_to_provider(
-        &self,
-        _app_type: &AppType,
-        _live_config: &Value,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 同步各应用的 Live Token
-    async fn sync_live_to_providers(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
         if let Some(server) = self.server.write().await.take() {
@@ -307,26 +269,7 @@ impl ProxyService {
         }
     }
 
-    /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
-    pub async fn stop_with_restore(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 停止代理服务器（恢复 Live 配置，但保留 settings 表中的代理状态）
-    pub async fn stop_with_restore_keep_state(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 备份各应用的 Live 配置
-    async fn backup_live_configs(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 备份指定应用的 Live 配置（严格模式）
-    async fn backup_live_config_strict(&self, _app_type: &AppType) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
     async fn build_proxy_urls(&self) -> Result<(String, String), String> {
         let config = self.build_proxy_config();
@@ -500,34 +443,7 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 恢复指定应用的 Live 配置（若无备份则不做任何操作）
-    async fn restore_live_config_for_app(&self, _app_type: &AppType) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    async fn restore_live_config_for_app_inner(&self, _app_type: &AppType) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 恢复原始 Live 配置
-    async fn restore_live_configs(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    async fn restore_live_config_for_app_with_fallback(
-        &self,
-        _app_type: &AppType,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    async fn restore_live_config_for_app_with_fallback_inner(
-        &self,
-        _app_type: &AppType,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     fn write_live_config_for_app(&self, app_type: &AppType, config: &Value) -> Result<(), String> {
         match app_type {
             AppType::Claude => self.write_claude_live(config),
@@ -555,11 +471,7 @@ impl ProxyService {
         }
     }
 
-    /// 当 Live 备份缺失时，尝试用 SSOT（当前供应商）写回 Live，以解除占位符接管。
-    fn restore_live_from_ssot_for_app(&self, _app_type: &AppType) -> Result<bool, String> {
-        unimplemented!("DB removed")
-    }
-
+    
     fn cleanup_takeover_placeholders_in_live_for_app(
         &self,
         app_type: &AppType,
@@ -666,16 +578,7 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 检查是否处于 Live 接管模式
-    pub async fn is_takeover_active(&self) -> Result<bool, String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 从异常退出中恢复（启动时调用）
-    pub async fn recover_from_crash(&self) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     /// 检测 Live 配置是否处于"被接管"的残留状态
     pub fn detect_takeover_in_live_configs(&self) -> bool {
         if let Ok(config) = self.read_claude_live() {
@@ -735,24 +638,7 @@ impl ProxyService {
         env.get("GEMINI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
     }
 
-    /// 从供应商配置更新 Live 备份（用于代理模式下的热切换）
-    pub async fn update_live_backup_from_provider(
-        &self,
-        _app_type: &str,
-        _provider: &Provider,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
-    /// 仅供已持有 per-app 切换锁的调用方使用。
-    async fn update_live_backup_from_provider_inner(
-        &self,
-        _app_type: &str,
-        _provider: &Provider,
-    ) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     pub async fn hot_switch_provider(
         &self,
         app_type: &str,
@@ -1025,11 +911,7 @@ impl ProxyService {
         self.build_proxy_config()
     }
 
-    /// 更新代理配置
-    pub async fn update_config(&self, _config: &ProxyConfig) -> Result<(), String> {
-        unimplemented!("DB removed")
-    }
-
+    
     /// 检查服务器是否正在运行
     pub async fn is_running(&self) -> bool {
         self.server.read().await.is_some()
@@ -1181,54 +1063,4 @@ model = "gpt-5.1-codex"
         assert_eq!(base_url, new_url);
     }
 
-    // NOTE: The following tests that relied on Database::memory() have been removed
-    // because the DB layer has been replaced with RuntimeConfig (YAML-driven).
-    // The sync_live_config_to_provider, hot_switch_provider backup operations,
-    // and other DB-dependent test scenarios need to be rewritten with a
-    // RuntimeConfig-based approach. For now they are commented out as the
-    // underlying methods are marked unimplemented!("DB removed").
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn sync_claude_token_does_not_add_anthropic_api_key() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn sync_claude_token_respects_existing_api_key_field() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn switch_proxy_target_updates_live_backup_when_taken_over() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn hot_switch_provider_updates_claude_live_while_preserving_takeover_fields() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn hot_switch_provider_serializes_same_app_switches() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn restore_waits_for_hot_switch_and_restores_latest_backup() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn update_live_backup_from_provider_applies_claude_common_config() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn update_live_backup_from_provider_applies_codex_common_config() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn update_live_backup_from_provider_preserves_codex_mcp_servers() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn hot_switch_codex_provider_keeps_model_provider_stable_in_backup_and_restore() { ... }
-
-    // #[tokio::test]
-    // #[serial]
-    // async fn update_live_backup_from_provider_keeps_new_codex_mcp_entries_on_conflict() { ... }
-}
+    }

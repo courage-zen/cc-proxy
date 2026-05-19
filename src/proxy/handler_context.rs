@@ -142,7 +142,7 @@ impl RequestContext {
                     ProxyError::AllProvidersCircuitOpen
                 }
                 crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
-                _ => ProxyError::DatabaseError(e.to_string()),
+                _ => ProxyError::Internal(e.to_string()),
             })?;
 
         let provider = providers

@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::services::skill::SkillStore;
-
 /// MCP 服务器应用状态（标记应用到哪些客户端）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct McpApps {
@@ -74,149 +72,6 @@ impl McpApps {
 }
 
 /// Skill 应用启用状态（标记 Skill 应用到哪些客户端）
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct SkillApps {
-    #[serde(default)]
-    pub claude: bool,
-    #[serde(default)]
-    pub codex: bool,
-    #[serde(default)]
-    pub gemini: bool,
-    #[serde(default)]
-    pub opencode: bool,
-    #[serde(default)]
-    pub hermes: bool,
-}
-
-impl SkillApps {
-    /// 检查指定应用是否启用
-    pub fn is_enabled_for(&self, app: &AppType) -> bool {
-        match app {
-            AppType::Claude => self.claude,
-            AppType::Codex => self.codex,
-            AppType::Gemini => self.gemini,
-            AppType::OpenCode => self.opencode,
-            AppType::Hermes => self.hermes,
-            AppType::OpenClaw => false, // OpenClaw doesn't support Skills
-            AppType::ClaudeDesktop => false,
-        }
-    }
-
-    /// 设置指定应用的启用状态
-    pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
-        match app {
-            AppType::Claude => self.claude = enabled,
-            AppType::Codex => self.codex = enabled,
-            AppType::Gemini => self.gemini = enabled,
-            AppType::OpenCode => self.opencode = enabled,
-            AppType::Hermes => self.hermes = enabled,
-            AppType::OpenClaw => {} // OpenClaw doesn't support Skills, ignore
-            AppType::ClaudeDesktop => {} // Claude Desktop 3P profiles don't use CC Switch skill sync
-        }
-    }
-
-    /// 获取所有启用的应用列表
-    pub fn enabled_apps(&self) -> Vec<AppType> {
-        let mut apps = Vec::new();
-        if self.claude {
-            apps.push(AppType::Claude);
-        }
-        if self.codex {
-            apps.push(AppType::Codex);
-        }
-        if self.gemini {
-            apps.push(AppType::Gemini);
-        }
-        if self.opencode {
-            apps.push(AppType::OpenCode);
-        }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
-        apps
-    }
-
-    /// 检查是否所有应用都未启用
-    pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
-    }
-
-    /// 仅启用指定应用（其他应用设为禁用）
-    pub fn only(app: &AppType) -> Self {
-        let mut apps = Self::default();
-        apps.set_enabled_for(app, true);
-        apps
-    }
-
-    /// 从来源标签列表构建启用状态
-    ///
-    /// 标签与 AppType::as_str() 一致时启用对应应用，
-    /// 其他标签（如 "agents", "cc-proxy"）忽略。
-    pub fn from_labels(labels: &[String]) -> Self {
-        let mut apps = Self::default();
-        for label in labels {
-            if let Ok(app) = label.parse::<AppType>() {
-                apps.set_enabled_for(&app, true);
-            }
-        }
-        apps
-    }
-}
-
-/// 已安装的 Skill（v3.10.0+ 统一结构）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstalledSkill {
-    /// 唯一标识符（格式："owner/repo:directory" 或 "local:directory"）
-    pub id: String,
-    /// 显示名称
-    pub name: String,
-    /// 描述
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// 安装目录名（在 SSOT 目录中的子目录名）
-    pub directory: String,
-    /// 仓库所有者（GitHub 用户/组织）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_owner: Option<String>,
-    /// 仓库名称
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_name: Option<String>,
-    /// 仓库分支
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_branch: Option<String>,
-    /// README URL
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub readme_url: Option<String>,
-    /// 应用启用状态
-    pub apps: SkillApps,
-    /// 安装时间（Unix 时间戳）
-    pub installed_at: i64,
-    /// 内容哈希（SHA-256，用于更新检测）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-    /// 最近更新时间（Unix 时间戳，0 = 从未更新）
-    #[serde(default)]
-    pub updated_at: i64,
-}
-
-/// 未管理的 Skill（在应用目录中发现但未被 CC Switch 管理）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnmanagedSkill {
-    /// 目录名
-    pub directory: String,
-    /// 显示名称（从 SKILL.md 解析）
-    pub name: String,
-    /// 描述
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// 在哪些应用目录中发现（如 ["claude", "codex"]）
-    pub found_in: Vec<String>,
-    /// 发现路径（首个匹配的完整路径）
-    pub path: String,
-}
-
 /// MCP 服务器定义（v3.7.0 统一结构）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServer {
@@ -332,8 +187,8 @@ pub struct PromptRoot {
 
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
-use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
+use std::path::PathBuf;
 
 /// 应用类型
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -478,9 +333,6 @@ pub struct MultiAppConfig {
     /// Prompt 配置（按客户端分治）
     #[serde(default)]
     pub prompts: PromptRoot,
-    /// Claude Skills 配置
-    #[serde(default)]
-    pub skills: SkillStore,
     /// 通用配置片段（按应用分治）
     #[serde(default)]
     pub common_config_snippets: CommonConfigSnippets,
@@ -509,7 +361,6 @@ impl Default for MultiAppConfig {
             apps,
             mcp: McpRoot::default(),
             prompts: PromptRoot::default(),
-            skills: SkillStore::default(),
             common_config_snippets: CommonConfigSnippets::default(),
             claude_common_config_snippet: None,
         }
@@ -517,6 +368,21 @@ impl Default for MultiAppConfig {
 }
 
 impl MultiAppConfig {
+    /// 获取提示词文件路径
+    fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
+        let dir = get_app_config_dir();
+        let filename = match app {
+            AppType::Claude => "claude_prompt.md",
+            AppType::ClaudeDesktop => "claude_desktop_prompt.md",
+            AppType::Codex => "codex_prompt.md",
+            AppType::Gemini => "gemini_prompt.md",
+            AppType::OpenCode => "opencode_prompt.md",
+            AppType::OpenClaw => "openclaw_prompt.md",
+            AppType::Hermes => "hermes_prompt.md",
+        };
+        Ok(dir.join(filename))
+    }
+
     /// 从文件加载配置（仅支持 v2 结构）
     pub fn load() -> Result<Self, AppError> {
         let config_path = get_app_config_path();
@@ -553,35 +419,10 @@ impl MultiAppConfig {
             ));
         }
 
-        let has_skills_in_config = value
-            .as_object()
-            .is_some_and(|map| map.contains_key("skills"));
-
         // 解析 v2 结构
         let mut config: Self =
             serde_json::from_value(value).map_err(|e| AppError::json(&config_path, e))?;
         let mut updated = false;
-
-        if !has_skills_in_config {
-            let skills_path = get_app_config_dir().join("skills.json");
-            if skills_path.exists() {
-                match std::fs::read_to_string(&skills_path) {
-                    Ok(content) => match serde_json::from_str::<SkillStore>(&content) {
-                        Ok(store) => {
-                            config.skills = store;
-                            updated = true;
-                            log::info!("已从旧版 skills.json 导入 Claude Skills 配置");
-                        }
-                        Err(e) => {
-                            log::warn!("解析旧版 skills.json 失败: {e}");
-                        }
-                    },
-                    Err(e) => {
-                        log::warn!("读取旧版 skills.json 失败: {e}");
-                    }
-                }
-            }
-        }
 
         // 确保 gemini 应用存在（兼容旧配置文件）
         if !config.apps.contains_key("gemini") {
@@ -747,7 +588,7 @@ impl MultiAppConfig {
     /// - Ok(true)  表示成功导入了非空文件
     /// - Ok(false) 表示未导入（文件不存在、内容为空或读取失败）
     fn auto_import_prompt_if_exists(config: &mut Self, app: AppType) -> Result<bool, AppError> {
-        let file_path = prompt_file_path(&app)?;
+        let file_path = Self::prompt_file_path(&app)?;
 
         // 检查文件是否存在
         if !file_path.exists() {
@@ -1026,7 +867,7 @@ mod tests {
     }
 
     fn write_prompt_file(app: AppType, content: &str) {
-        let path = crate::prompt_files::prompt_file_path(&app).expect("prompt path");
+        let path = MultiAppConfig::prompt_file_path(&app).expect("prompt path");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent dir");
         }

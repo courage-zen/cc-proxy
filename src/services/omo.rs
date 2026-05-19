@@ -295,7 +295,6 @@ impl OmoService {
             in_failover_queue: false,
         };
 
-        // DB removed: provider is not persisted; just write config file
         Self::write_config_to_file(state, v)?;
         Ok(provider)
     }

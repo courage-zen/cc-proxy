@@ -923,7 +923,4 @@ mod tests {
         );
     }
 
-    // DB-removed: usage logging tests that required Database::memory() have been removed.
-    // The log_usage_internal function still works with ProxyState but tests would need
-    // a different approach without rusqlite.
-}
+    }

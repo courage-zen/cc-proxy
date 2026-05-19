@@ -11,25 +11,21 @@ mod error;
 mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
-mod init_status;
 mod mcp;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
 mod prompt;
-mod prompt_files;
 mod provider;
-mod provider_defaults;
 pub mod cli;
 pub mod cli_config;
-pub mod cli_stub;
 pub mod yaml_store;
 pub mod proxy;
 mod services;
 mod settings;
 pub mod store;
 
-pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
+pub use app_config::{AppType, McpApps, McpServer, MultiAppConfig};
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
 pub use error::AppError;
@@ -41,8 +37,7 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta};
 pub use services::{
-    ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
-    SkillService, SpeedtestService,
+    McpService, ProviderService, ProxyService,
 };
 pub use settings::{update_settings, AppSettings};
 pub use store::AppState;

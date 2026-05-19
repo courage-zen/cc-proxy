@@ -4,7 +4,7 @@
 //! - 去重控制（避免多个请求同时触发）
 //! - 日志记录
 //!
-//! YAML 模式下不再写 DB 或改写 Live 配置，只更新内存中的 current_provider 和日志。
+//! 只更新内存中的 current_provider 和日志。
 
 use crate::store::RuntimeConfig;
 use crate::error::AppError;
