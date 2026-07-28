@@ -1,6 +1,6 @@
 [package]
 name = "cc-proxy"
-version = "0.1.0"
+version = "0.1.1"
 description = "All-in-One HTTP Proxy for Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw & Hermes Agent"
 authors = ["Jason Young","Zheng Yong"]
 license = "MIT"
@@ -76,3 +76,4 @@ strip = "symbols"
 
 [dev-dependencies]
 serial_test = "3"
+tempfile = "3"

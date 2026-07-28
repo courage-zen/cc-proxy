@@ -249,46 +249,51 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                         }
 
                                         // 处理 reasoning（thinking）
+                                        // 跳过空 reasoning：某些上游（如 GLM-5.2）每个 chunk 都带空字符串
+                                        // reasoning 字段，若不过滤会反复 open/close thinking block，
+                                        // 把 text 内容碎片化成大量极短 block，导致 Claude Code 显示异常换行。
                                         if let Some(reasoning) = &choice.delta.reasoning {
-                                            if current_non_tool_block_type != Some("thinking") {
-                                                if let Some(index) = current_non_tool_block_index.take() {
+                                            if !reasoning.is_empty() {
+                                                if current_non_tool_block_type != Some("thinking") {
+                                                    if let Some(index) = current_non_tool_block_index.take() {
+                                                        let event = json!({
+                                                            "type": "content_block_stop",
+                                                            "index": index
+                                                        });
+                                                        let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                            serde_json::to_string(&event).unwrap_or_default());
+                                                        yield Ok(Bytes::from(sse_data));
+                                                    }
+                                                    let index = next_content_index;
+                                                    next_content_index += 1;
                                                     let event = json!({
-                                                        "type": "content_block_stop",
-                                                        "index": index
+                                                        "type": "content_block_start",
+                                                        "index": index,
+                                                        "content_block": {
+                                                            "type": "thinking",
+                                                            "thinking": ""
+                                                        }
                                                     });
-                                                    let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                    let sse_data = format!("event: content_block_start\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse_data));
+                                                    current_non_tool_block_type = Some("thinking");
+                                                    current_non_tool_block_index = Some(index);
+                                                }
+
+                                                if let Some(index) = current_non_tool_block_index {
+                                                    let event = json!({
+                                                        "type": "content_block_delta",
+                                                        "index": index,
+                                                        "delta": {
+                                                            "type": "thinking_delta",
+                                                            "thinking": reasoning
+                                                        }
+                                                    });
+                                                    let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
                                                         serde_json::to_string(&event).unwrap_or_default());
                                                     yield Ok(Bytes::from(sse_data));
                                                 }
-                                                let index = next_content_index;
-                                                next_content_index += 1;
-                                                let event = json!({
-                                                    "type": "content_block_start",
-                                                    "index": index,
-                                                    "content_block": {
-                                                        "type": "thinking",
-                                                        "thinking": ""
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_start\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
-                                                current_non_tool_block_type = Some("thinking");
-                                                current_non_tool_block_index = Some(index);
-                                            }
-
-                                            if let Some(index) = current_non_tool_block_index {
-                                                let event = json!({
-                                                    "type": "content_block_delta",
-                                                    "index": index,
-                                                    "delta": {
-                                                        "type": "thinking_delta",
-                                                        "thinking": reasoning
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
                                             }
                                         }
 
@@ -1103,6 +1108,57 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| event_type(event) == Some("message_stop")));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_empty_reasoning_does_not_fragment_text_block() {
+        // GLM-5.2 returns every chunk with an empty `reasoning` field alongside
+        // the actual `content`. Before the fix, the empty reasoning triggered
+        // a thinking block open/close on every chunk, fragmenting the text
+        // into many tiny blocks and producing excessive newlines in Claude Code.
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_glm\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning\":\"\",\"content\":\"你好\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning\":\"\",\"content\":\"世界\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning\":\"\",\"content\":\"！\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events(input).await;
+
+        let thinking_starts = events
+            .iter()
+            .filter(|e| {
+                event_type(e) == Some("content_block_start")
+                    && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("thinking")
+            })
+            .count();
+        assert_eq!(
+            thinking_starts, 0,
+            "empty reasoning must not open thinking blocks, got {thinking_starts}"
+        );
+
+        let text_starts = events
+            .iter()
+            .filter(|e| {
+                event_type(e) == Some("content_block_start")
+                    && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("text")
+            })
+            .count();
+        assert_eq!(
+            text_starts, 1,
+            "consecutive text deltas must merge into a single text block, got {text_starts}"
+        );
+
+        let text_deltas: Vec<&str> = events
+            .iter()
+            .filter(|e| {
+                event_type(e) == Some("content_block_delta")
+                    && e.pointer("/delta/type").and_then(|v| v.as_str()) == Some("text_delta")
+            })
+            .filter_map(|e| e.pointer("/delta/text").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(text_deltas.concat(), "你好世界！");
     }
 
     #[tokio::test]

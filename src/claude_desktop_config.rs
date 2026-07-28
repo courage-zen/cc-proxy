@@ -317,6 +317,13 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Returns true if the provider can be written as a Claude Desktop direct provider.
+/// Mirrors the checks in [`validate_direct_provider`] but as a boolean predicate
+/// so tests can assert compatibility without constructing error messages.
+pub fn is_compatible_direct_provider(provider: &Provider) -> bool {
+    validate_direct_provider(provider).is_ok()
+}
+
 pub fn validate_proxy_provider(provider: &Provider) -> Result<(), AppError> {
     if is_official_provider(provider) {
         return Ok(());
@@ -1380,8 +1387,8 @@ mod tests {
         let direct = direct_provider("direct");
         let runtime = test_runtime();
 
-        apply_provider_to_paths(&db, &direct, &paths).expect("apply direct provider");
-        apply_provider_to_paths(&db, &official_provider(), &paths)
+        apply_provider_to_paths(&runtime, &direct, &paths).expect("apply direct provider");
+        apply_provider_to_paths(&runtime, &official_provider(), &paths)
             .expect("restore official provider");
 
         let normal: Value = read_json_file(&paths.normal_config_path).expect("read normal config");
